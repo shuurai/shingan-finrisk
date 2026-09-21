@@ -52,10 +52,62 @@ _SENTENCE_RE = re.compile(r"[.!?]+(?:\s|$)")
 
 #: Matches "Item 1A", "ITEM 1A.", "Item 7A -" etc. Anchored to reduce false hits
 #: from cross-references like "see Item 1A of this report".
+#:
+#: Items 2 and 4 are present only because 10-Q filings use a different numbering: a 10-Q's
+#: MD&A is "Item 2", where a 10-K's is "Item 7". Without them 1675 of the Stage 2 corpus's
+#: 2222 documents had no MD&A section at all, and ``mdna_token_share`` and
+#: ``neg_kw_density_mdna`` were structurally zero for three quarters of the sample. The
+#: collision is real — a 10-K's "Item 2" is Properties — and is handled by ordering in
+#: :data:`MDNA_SECTIONS`, where Item 7 is tried first.
 _ITEM_HEADING_RE = re.compile(
-    r"(?m)^[ \t]*item[ \t]+(1a|1b|1|c|7a|7|8|9a|9b|9|3|5|11|13|15)\b[ \t]*[.:\-)\u2013]?",
+    r"(?m)^[ \t]*item[ \t]+(1a|1b|1c|1|2|3|4|5|7a|7|8|9a|9b|9|11|13|15)\b[ \t]*[.:\-)\u2013]?",
     re.IGNORECASE,
 )
+
+#: Matches headings in the flattened text layer. A large share of EDGAR primary
+#: documents — 419 of this corpus's 547 10-Ks — convert to text with almost no
+#: newlines left (one sampled document: 5 newlines in 504,154 characters), so
+#: ``(?m)^`` can never fire and every such filing fell back to the unsplit
+#: document. What survives the flattening is capitalisation: headings are ALL
+#: CAPS (``"... 11 ITEM 1A. RISK FACTORS Our ability ..."``) while prose
+#: cross-references are mixed case (``"the risk factors listed in Item 1A could
+#: cause"``). Matching uppercase only, with no line anchor, recovers the
+#: headings without dragging in the cross-references.
+_ITEM_CAPS_HEADING_RE = re.compile(
+    r"\bITEM[ \t]+(1A|1B|1C|1|2|3|4|5|7A|7|8|9A|9B|9|11|13|15)\b[ \t]*[.:\-)\u2013]?"
+)
+
+#: Matches mixed-case inline headings, which the flattened text layer renders as
+#: e.g. ``"... Page Item 1A. Risk Factors Our ability ..."`` — Title case, no
+#: line start. This pattern is the riskiest of the three, because prose
+#: cross-references are also mixed case; requiring punctuation directly after
+#: the item number is the filter that keeps them out ("see Item 1A, Risk
+#: Factors" and "listed in Item 1A could cause" carry no punctuation and do not
+#: match). Table-of-contents lines do match, but :func:`segment_items` keeps the
+#: longest text per label, and a real body heading always spans more than the
+#: TOC entry before it. In a 400-document sample of the flattened corpus this
+#: recovered Item 1A for all but 21 stylistic outliers.
+_ITEM_INLINE_HEADING_RE = re.compile(
+    r"\bItem[ \t]+(1A|1B|1C|1|2|3|4|5|7A|7|8|9A|9B|9|11|13|15)\b[ \t]*[.:\-)\u2013\u2014]"
+)
+
+
+def _heading_matches(raw_text: str) -> list[re.Match[str]]:
+    """Union of both heading patterns, ordered by position, overlaps resolved.
+
+    A line-anchored ``ITEM 1A`` also matches the caps pattern at the same
+    position, so de-duplication by start offset is what keeps them from
+    double-counting; a position can only be claimed once, first pattern wins.
+    """
+    claimed: dict[int, re.Match[str]] = {}
+    for pattern in (
+        _ITEM_HEADING_RE,
+        _ITEM_CAPS_HEADING_RE,
+        _ITEM_INLINE_HEADING_RE,
+    ):
+        for match in pattern.finditer(raw_text):
+            claimed.setdefault(match.start(), match)
+    return [claimed[position] for position in sorted(claimed)]
 
 #: Canonical formatting for a section label, e.g. "1a" -> "Item 1A".
 _ITEM_LABELS: dict[str, str] = {
@@ -63,7 +115,9 @@ _ITEM_LABELS: dict[str, str] = {
     "1a": "Item 1A",
     "1b": "Item 1B",
     "1c": "Item 1C",
+    "2": "Item 2",
     "3": "Item 3",
+    "4": "Item 4",
     "5": "Item 5",
     "7": "Item 7",
     "7a": "Item 7A",
@@ -323,7 +377,14 @@ RESTATEMENT_PHRASES: tuple[str, ...] = (
 RISK_FACTOR_SECTIONS: tuple[str, ...] = ("Item 1A", "Item 1B", "Item 1C")
 
 #: MD&A, the second-most informative narrative section.
-MDNA_SECTIONS: tuple[str, ...] = ("Item 7", "Item 7A")
+#:
+#: Order is load-bearing. A 10-K's "Item 2" is Properties, not MD&A, so Item 7 must win
+#: wherever it exists; "Item 2" is listed last and is reached only by filings that have no
+#: Item 7 at all — which in practice means 10-Qs. If a future corpus ever contains a 10-K
+#: with no Item 7 heading, this fallback would silently measure Properties as MD&A, so
+#: ``scripts/fetch_sec_docs.py --report`` prints the per-form resolution rates that would
+#: expose it.
+MDNA_SECTIONS: tuple[str, ...] = ("Item 7", "Item 7A", "Item 2")
 
 
 def tokenize(text: str) -> list[str]:
@@ -398,7 +459,7 @@ def segment_items(raw_text: str) -> dict[str, str]:
     if not raw_text or not raw_text.strip():
         return {}
 
-    matches = list(_ITEM_HEADING_RE.finditer(raw_text))
+    matches = _heading_matches(raw_text)
     if len(matches) < 2:
         logger.debug("found %d Item headings; returning the document unsplit", len(matches))
         return {"Item 1": raw_text}

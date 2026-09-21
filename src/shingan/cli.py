@@ -704,29 +704,28 @@ def train_structured(
     )
     wanted = [label] if label else [str(item) for item in project.labels.targets]
 
-    import joblib
-
     from shingan.pipeline import PATH_FUSED, PATH_STRUCTURED, PATH_TEXT, run_pipeline
 
     result = run_pipeline(project, paths, labels=wanted, write=False)
     destination = Path(out) if out is not None else paths.models / "structured"
     destination.mkdir(parents=True, exist_ok=True)
 
-    saved: list[tuple[str, str, str]] = []
+    saved: list[tuple[str, str, Path]] = []
     for name, outcome in result.outcomes.items():
         if not outcome.fitted:
             console.print(f"[yellow]{name}: not fitted — {outcome.reason}[/yellow]")
             continue
         label_dir = destination / name
         label_dir.mkdir(parents=True, exist_ok=True)
-        structured = outcome.models[PATH_STRUCTURED]
-        structured.save(label_dir)
-        saved.append((name, PATH_STRUCTURED, str(label_dir / "model.joblib")))
-        for path in (PATH_TEXT, PATH_FUSED):
+        # Each model persists itself, so the file name is the class's own MODEL_FILENAME
+        # constant. Writing them here with a raw joblib.dump and a caller-chosen name is
+        # how `fused.joblib` came to sit next to a loader that looks for `fusion.joblib`.
+        for path in (PATH_STRUCTURED, PATH_TEXT, PATH_FUSED):
+            model = outcome.models.get(path)
+            if model is None:
+                continue
             try:
-                path_file = label_dir / f"{path}.joblib"
-                joblib.dump(outcome.models[path], path_file)
-                saved.append((name, path, str(path_file)))
+                saved.append((name, path, Path(model.save(label_dir))))
             except Exception as exc:
                 console.print(f"[yellow]{name}: could not persist {path}: {exc}[/yellow]")
         (label_dir / "metrics.json").write_text(

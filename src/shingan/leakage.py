@@ -491,6 +491,18 @@ def leakage_scan(
     }
 
 
+def _as_nanoseconds(series: pd.Series) -> pd.Series:
+    """Coerce a datetime column to nanosecond resolution.
+
+    pandas 3 keeps whatever unit it is handed rather than normalising to nanoseconds:
+    a parquet round-trip comes back as milliseconds, ``datetime64[s]`` survives from
+    arithmetic, and :func:`pandas.merge_asof` then refuses the join because the two
+    keys are different units. Normalising at the join is what makes a point-in-time
+    merge independent of how the frame was stored on its way here.
+    """
+    return pd.to_datetime(series).astype("datetime64[ns]")
+
+
 def merge_asof_point_in_time(
     left: pd.DataFrame,
     right: pd.DataFrame,
@@ -539,8 +551,8 @@ def merge_asof_point_in_time(
             "filed revision instead."
         )
 
-    left_sorted = left.assign(**{on: pd.to_datetime(left[on])}).sort_values([on, by])
-    right_sorted = right.assign(**{date_col: pd.to_datetime(right[date_col])}).sort_values(
+    left_sorted = left.assign(**{on: _as_nanoseconds(left[on])}).sort_values([on, by])
+    right_sorted = right.assign(**{date_col: _as_nanoseconds(right[date_col])}).sort_values(
         [date_col, by]
     )
 

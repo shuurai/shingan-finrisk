@@ -38,6 +38,12 @@ from shingan.logging_utils import get_logger
 logger = get_logger(__name__)
 
 SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
+#: Paginated continuation of the submissions index. A filer with heavy traffic (a large
+#: bank files hundreds of 424B2/FWP prospectus documents a month) fills the 1000-entry
+#: ``recent`` block within weeks, so anything older lives in ``filings.files[]``. Reading
+#: only ``recent`` silently truncates the history to the last few months for exactly the
+#: companies a credit model cares about most.
+SUBMISSIONS_FILE_URL = "https://data.sec.gov/submissions/{name}"
 COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 COMPANY_CONCEPT_URL = "https://data.sec.gov/api/xbrl/companyconcept/CIK{cik}/{taxonomy}/{concept}.json"
 ARCHIVE_BASE = "https://www.sec.gov/Archives/edgar/data"
@@ -234,14 +240,18 @@ class SecEdgarClient:
         forms: tuple[str, ...] = DEFAULT_FORMS,
         limit: int = 40,
         since: date | None = None,
+        cik: str | None = None,
     ) -> list[FilingRef]:
         """List recent filings of the given forms.
 
         Args:
-            ticker: Ticker present in :data:`CIK_BY_TICKER`.
+            ticker: Ticker present in :data:`CIK_BY_TICKER`, or supplied via ``cik``.
             forms: Form types to keep.
             limit: Maximum number of filings to return.
             since: Optional lower bound on the filing date.
+            cik: Explicit CIK, bypassing the ticker lookup. Needed when a caller has
+                already resolved the CIK (for example from a curated map) and EDGAR's
+                own ticker file is unreachable.
 
         Returns:
             Filing references, most recent first.
@@ -249,48 +259,81 @@ class SecEdgarClient:
         Raises:
             EdgarUnavailable: If the ticker is unknown or EDGAR is unreachable.
         """
-        cik = CIK_BY_TICKER.get(ticker.upper())
-        if cik is None:
+        resolved = cik or CIK_BY_TICKER.get(ticker.upper())
+        if resolved is None:
+            resolved = fetch_ticker_cik_map(self).get(ticker.upper())
+        if resolved is None:
             raise EdgarUnavailable(
-                f"no CIK known for {ticker!r}. Add it to CIK_BY_TICKER or fetch EDGAR's "
-                "company_tickers.json and use fetch_ticker_cik_map()."
+                f"no CIK known for {ticker!r}. Pass one explicitly with cik=, add it to "
+                "CIK_BY_TICKER, or check that EDGAR's company_tickers.json lists it."
             )
+        cik = resolved
 
         payload = self.submissions(cik)
-        recent = payload.get("filings", {}).get("recent", {})
-        required = ("accessionNumber", "form", "filingDate", "primaryDocument")
-        if not all(key in recent for key in required):
+        blocks = self._submission_blocks(cik, payload)
+        if not blocks:
             raise EdgarUnavailable(
                 f"submissions payload for CIK {cik} lacks the expected 'filings.recent' keys"
             )
 
         references: list[FilingRef] = []
-        for position in range(len(recent["form"])):
-            form = str(recent["form"][position])
-            if form not in forms:
+        required = ("accessionNumber", "form", "filingDate", "primaryDocument")
+        for recent in blocks:
+            if not all(key in recent for key in required):
                 continue
-            filed = pd.Timestamp(recent["filingDate"][position]).date()
-            if since is not None and filed < since:
-                continue
-            accession = str(recent["accessionNumber"][position])
-            document = str(recent["primaryDocument"][position])
-            period_raw = recent.get("reportDate", [None] * len(recent["form"]))[position]
-            references.append(
-                FilingRef(
-                    ticker=ticker.upper(),
-                    cik=cik,
-                    accession=accession,
-                    form=form,
-                    filed=filed,
-                    period=pd.Timestamp(period_raw).date() if period_raw else None,
-                    primary_document=document,
-                    url=_archive_url(cik, accession, document),
+            for position in range(len(recent["form"])):
+                form = str(recent["form"][position])
+                if form not in forms:
+                    continue
+                filed = pd.Timestamp(recent["filingDate"][position]).date()
+                if since is not None and filed < since:
+                    continue
+                accession = str(recent["accessionNumber"][position])
+                document = str(recent["primaryDocument"][position])
+                period_raw = recent.get("reportDate", [None] * len(recent["form"]))[position]
+                references.append(
+                    FilingRef(
+                        ticker=ticker.upper(),
+                        cik=cik,
+                        accession=accession,
+                        form=form,
+                        filed=filed,
+                        period=pd.Timestamp(period_raw).date() if period_raw else None,
+                        primary_document=document,
+                        url=_archive_url(cik, accession, document),
+                    )
                 )
-            )
+                if len(references) >= limit:
+                    break
             if len(references) >= limit:
                 break
         logger.debug("found %d filings for %s", len(references), ticker)
-        return references
+        references.sort(key=lambda reference: reference.filed, reverse=True)
+        return references[:limit]
+
+    def _submission_blocks(self, cik: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        """Return the recent block plus every older paginated block, newest first.
+
+        Each older block is a separate JSON document listed in ``filings.files``. They are
+        fetched lazily (and cached) because a company like JPM needs them all to reach
+        back past a few months, while a small filer needs none.
+        """
+        filings = payload.get("filings", {})
+        recent = filings.get("recent", {})
+        blocks: list[dict[str, Any]] = [recent] if isinstance(recent, dict) else []
+        for entry in filings.get("files", []) or []:
+            name = entry.get("name") if isinstance(entry, dict) else None
+            if not name:
+                continue
+            try:
+                older = self._get_json(
+                    SUBMISSIONS_FILE_URL.format(name=name), cache_name=f"submissions_{name}"
+                )
+            except EdgarUnavailable as exc:  # a missing history block must not fail the list
+                logger.warning("could not read submissions history block %s: %s", name, exc)
+                continue
+            blocks.append(older)
+        return blocks
 
     def fetch_document(self, url: str) -> str:
         """Fetch a filing document and return it as plain text."""

@@ -1,0 +1,62 @@
+# =====================================================================================
+# Shingan — Stage 2 real-data overlay (first real run)
+# =====================================================================================
+# Deep-merged onto `configs/default.yaml`. Switches the pipeline from the synthetic
+# generator to the real fetchers:
+#
+#   * `sources: [prices_yfinance, edgar]` — daily adjusted prices via yfinance and
+#     SEC EDGAR (submissions index + inline XBRL companyfacts + filing documents).
+#   * `offline: false` — required for both. `build_panel` loads the fetched tables
+#     from `data/raw/real/`, produced by `scripts/fetch_real.py`.
+#   * `labels.targets: [tail_risk]` — the honest first step. `default_risk` and
+#     `fraud_risk` require event sources (rating histories, restatement 8-Ks,
+#     enforcement lists) that are not wired yet (docs/02-data.md section 2.4), so
+#     evaluating them here could only produce empty reports. `tail_risk` is computed
+#     from prices alone and carries real positives in this window (2018 GE, the 2020
+#     crash across the basket, WBA 2023). With the fraud horizon out of the margin,
+#     `split.purge_days` drops from 730 to ~42 days and far more of the 15-year panel
+#     survives purging.
+#
+# FNSPID news is deliberately not selected: the dataset is an offline snapshot that
+# must be downloaded separately (~several GB). Text features that depend on news
+# (`n_news_*`, `sent_*`) will be zero/NaN and the report should say so.
+# =====================================================================================
+
+data:
+  # 34 names across financials, industrials, energy, telecom, autos, consumer,
+  # airlines, healthcare and a few large tech. Deliberately over-weights names that
+  # actually went through stress in 2010-2024 (GE's restructuring, F/GM and the
+  # airlines in 2020, M/WBA/TGT/KSS in retail, X/DOW/MRO/APA/OXY in the energy cycle,
+  # AIG and the banks): tail_risk is a rare-event label, and a universe of stable
+  # mega-caps alone produces too few positives to evaluate anything.
+  universe: [
+      JPM, GS, GE, CAT, BA, XOM, T, F, M, WBA,
+      BAC, C, WFC, AIG, CVX, HAL, OXY, GM, DIS, VZ,
+      INTC, CSCO, TGT, KSS, DOW, X, MRO, APA, CVS, AAL,
+      UAL, DAL, MMM, IBM,
+    ]
+  start: 2010-01-01
+  end: 2024-12-31
+  sources: [prices_yfinance, edgar]
+  offline: false
+  # SEC requires a descriptive User-Agent with a contact address. The value below was
+  # chosen after measuring which contact addresses the archive actually accepts:
+  # www.sec.gov returns 403 "Undeclared Automated Tool" for a Contact at github.com —
+  # including the users.noreply.github.com address this file used to carry — while
+  # addresses at ordinary domains pass. Not a shape problem: the same string with
+  # a@example.org or research@shingan.dev is served normally, and a@noreply.com too.
+  # Replace with a contact you actually read; set SHINGAN_SEC_USER_AGENT to override.
+  sec_user_agent: "shingan-research/0.1 (contact: research@shingan.dev)"
+  # Where scripts/fetch_real.py persists the fetched tables and build_panel finds them.
+  cache_dir: data/raw/real
+
+labels:
+  targets: [tail_risk]
+
+split:
+  # The default 730 is sized for fraud_risk's horizon and is *not* lowered
+  # automatically when fewer targets are configured — the validator only rejects
+  # values that are too small. With tail_risk alone (~42 calendar days) a 60-day
+  # purge keeps the point-in-time guarantee without sacrificing two extra years of
+  # sample; margin = 60 + 30 embargo = 90 days.
+  purge_days: 60

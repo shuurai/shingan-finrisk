@@ -309,6 +309,121 @@ FORWARD_COLUMNS: tuple[str, ...] = ("fwd_ret_21d", "fwd_realized_vol_21d", "fwd_
 
 WEIGHT_COLUMNS: tuple[str, ...] = ("sample_weight",)
 
+#: The data leg that supplies each feature. A feature that is absent everywhere is
+#: otherwise indistinguishable from a feature whose source was never wired, and the two
+#: call for opposite responses: the first is a bug in this repository, the second is a
+#: fetch that has not been run. Naming the source turns "15 features were dropped" into
+#: a work item.
+SOURCE_XBRL = "sec_xbrl_fundamentals"
+SOURCE_PRICES = "prices_ohlcv"
+SOURCE_PRICES_SHARES = "prices_ohlcv+shares_outstanding"
+SOURCE_PRICES_BENCHMARK = "prices_ohlcv+index_benchmark"
+SOURCE_MARKET_VOL = "market_volatility_index"
+SOURCE_MACRO_CREDIT = "macro_credit_spread"
+SOURCE_FILING_TEXT = "sec_filing_text"
+SOURCE_NEWS = "news_feed"
+
+#: What to do about a gap, per source. Written as an instruction rather than an apology:
+#: a caveat that only says "this was missing" leaves the reader to guess whether it is
+#: recoverable, and the answers here range from "one more symbol" to "no source exists".
+SOURCE_ADVICE: dict[str, str] = {
+    SOURCE_XBRL: (
+        "the XBRL fetch already runs; a gap here means the concept mapping in "
+        "scripts/fetch_real.py lacks a tag this filer uses, so extend CONCEPTS_BY_COLUMN"
+    ),
+    SOURCE_PRICES: (
+        "the price fetch already runs; a gap here means the ticker returned no series "
+        "(delisted or unavailable) and the universe entry should be replaced or dropped"
+    ),
+    SOURCE_PRICES_SHARES: (
+        "recoverable for free: XBRL dei:EntityCommonStockSharesOutstanding carries a filed "
+        "date per observation, so turnover_20d needs no new vendor"
+    ),
+    SOURCE_PRICES_BENCHMARK: (
+        "one extra symbol: fetch ^GSPC alongside the universe and regress on it"
+    ),
+    SOURCE_MARKET_VOL: "one extra symbol: fetch ^VIX alongside the universe",
+    SOURCE_MACRO_CREDIT: (
+        "one series from FRED (BAA10Y or the HY OAS index); not wired at all today"
+    ),
+    SOURCE_FILING_TEXT: (
+        "run scripts/fetch_sec_docs.py — the archive is reachable and the accession "
+        "numbers to address it are already in the filings table"
+    ),
+    SOURCE_NEWS: (
+        "no source wired. FNSPID is a snapshot, not a feed; a live vendor or an "
+        "archive are both open decisions, so treat every news-derived column as absent"
+    ),
+}
+
+#: Per-feature source. Groups first, then the features that do not follow their group.
+FEATURE_SOURCES: dict[str, str] = {
+    **{name: SOURCE_XBRL for name in RATIO_COLUMNS if name != "ratios_missing_frac"},
+    **{name: SOURCE_PRICES for name in TECHNICAL_COLUMNS},
+    **{name: SOURCE_NEWS for name in ("n_news_30d", "n_news_90d")},
+}
+FEATURE_SOURCES.update(
+    {
+        "turnover_20d": SOURCE_PRICES_SHARES,
+        "beta_252d": SOURCE_PRICES_BENCHMARK,
+        "vix_level": SOURCE_MARKET_VOL,
+        "vix_chg_5d": SOURCE_MARKET_VOL,
+        "credit_spread_chg_20d": SOURCE_MACRO_CREDIT,
+        # Not a ratio, but it is the fraction of the ratio block that is absent, so it is
+        # owed by the same fetch and the same concept mapping. It used to be excluded from
+        # the RATIO_COLUMNS comprehension above and never assigned anywhere else, which left
+        # it with no declared source: a gap in this column produced the placeholder remedy
+        # instead of the XBRL one, and `test_every_feature_column_has_a_declared_source`
+        # now fails if that recurs.
+        "ratios_missing_frac": SOURCE_XBRL,
+        "sent_mean_30d": SOURCE_NEWS,
+        "sent_std_30d": SOURCE_NEWS,
+        "sent_neg_share_30d": SOURCE_NEWS,
+        **{
+            name: SOURCE_FILING_TEXT
+            for name in (
+                "neg_kw_density_mdna",
+                "risk_factor_token_share",
+                "disclosure_len_tokens",
+                "disclosure_len_chg",
+                "going_concern_hits",
+                "uncertainty_hits",
+                "restatement_hits",
+            )
+        },
+    }
+)
+
+
+def diagnose_gaps(features: Iterable[str]) -> list[dict[str, Any]]:
+    """Group absent features by the source that owes them, with the remedy for each.
+
+    Args:
+        features: Feature names that were dropped or that held no observation.
+
+    Returns:
+        One record per source, ordered by how many features it accounts for: ``source``,
+        ``features`` (sorted), ``count``, ``advice``. Unknown names are grouped under
+        ``"unmapped"`` rather than dropped, because a feature with no declared source is
+        itself a defect worth seeing.
+    """
+    grouped: dict[str, list[str]] = {}
+    for name in features:
+        grouped.setdefault(FEATURE_SOURCES.get(name, "unmapped"), []).append(name)
+    records = [
+        {
+            "source": source,
+            "features": sorted(names),
+            "count": len(names),
+            "advice": SOURCE_ADVICE.get(
+                source, "no declared source — add it to FEATURE_SOURCES in schema.py"
+            ),
+        }
+        for source, names in grouped.items()
+    ]
+    records.sort(key=lambda record: (-record["count"], record["source"]))
+    return records
+
 #: Every column of the processed panel, in the order it is written.
 PANEL_COLUMNS: tuple[str, ...] = (
     *ID_COLUMNS,
@@ -504,6 +619,7 @@ def panel_subset(groups: Sequence[str]) -> tuple[str, ...]:
 __all__ = [
     "EVENT_COLUMNS",
     "FEATURE_GROUPS",
+    "FEATURE_SOURCES",
     "FORBIDDEN_PREFIXES",
     "FORWARD_COLUMNS",
     "HORIZON_COLUMNS",
@@ -514,10 +630,20 @@ __all__ = [
     "NON_FEATURE_COLUMNS",
     "PANEL_COLUMNS",
     "RATIO_COLUMNS",
+    "SOURCE_ADVICE",
+    "SOURCE_FILING_TEXT",
+    "SOURCE_MACRO_CREDIT",
+    "SOURCE_MARKET_VOL",
+    "SOURCE_NEWS",
     "SOURCE_OF_RECORD_COLUMNS",
+    "SOURCE_PRICES",
+    "SOURCE_PRICES_BENCHMARK",
+    "SOURCE_PRICES_SHARES",
+    "SOURCE_XBRL",
     "TECHNICAL_COLUMNS",
     "TEXT_COUNT_COLUMNS",
     "WEIGHT_COLUMNS",
+    "diagnose_gaps",
     "EvidenceSpan",
     "OutOfScopeLabel",
     "RiskAssessment",

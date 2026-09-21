@@ -149,6 +149,13 @@ def average_precision(y_true: Any, y_score: Any) -> float:
     :func:`average_precision_lift` exists and why the report always prints the
     random baseline next to it.
 
+    Tied scores are resolved as one group, because a tie carries no ordering information.
+    The earlier implementation summed precision at every row, so ties were broken by
+    whatever order the frame happened to be in: a constant score — a model with no signal
+    at all — scored 1.0 with the positives listed first and 0.27 with them listed last,
+    while :func:`roc_auc` reported 0.5 for both. Any metric whose value depends on the
+    row order of the panel is not measuring the model.
+
     Returns:
         Average precision, or NaN when undefined for this fold.
     """
@@ -157,13 +164,17 @@ def average_precision(y_true: Any, y_score: Any) -> float:
         return NAN
     order = np.argsort(-score, kind="stable")
     ordered_truth = (truth[order] >= 0.5).astype(float)
+    ordered_score = np.asarray(score, dtype=float)[order]
+
+    # The last row of each run of equal scores: the only points where precision and recall
+    # are well defined, since between them the ranking is arbitrary.
+    group_ends = np.flatnonzero(np.diff(ordered_score) != 0.0) + 1
+    group_ends = np.concatenate([group_ends, [ordered_truth.size]])
     cumulative = np.cumsum(ordered_truth)
-    positions = np.arange(1, ordered_truth.size + 1)
-    precision = cumulative / positions
-    recall = cumulative / cumulative[-1]
-    # Sum the precision at each positive, weighted by the recall step it adds.
-    recall_step = np.diff(np.concatenate([[0.0], recall]))
-    return float(np.sum(precision * recall_step))
+    precision_at_group = cumulative[group_ends - 1] / group_ends
+    group_positives = np.diff(np.concatenate([[0.0], cumulative[group_ends - 1]]))
+    recall_step = group_positives / cumulative[-1]
+    return float(np.sum(precision_at_group * recall_step))
 
 
 def average_precision_lift(y_true: Any, y_score: Any) -> float:
@@ -478,15 +489,23 @@ def calibration_curve_table(
     if truth.size == 0:
         return pd.DataFrame(columns=["bin", "n", "mean_predicted", "observed_rate", "abs_gap"])
     frame = pd.DataFrame({"y": (truth >= 0.5).astype(int), "p": score})
+    bins = min(n_bins, max(2, len(frame)))
     if strategy == "quantile":
-        frame["bin"] = pd.qcut(
-            frame["p"].rank(method="first"),
-            min(n_bins, max(2, len(frame))),
-            labels=False,
-            duplicates="drop",
-        )
+        # Edges come from the score values, never from their ranks. Ranking with
+        # ``method="first"`` broke ties by row order, which put four identical scores into
+        # four different bins: a constant forecast of the base rate reported an ECE of 0.5,
+        # and every tie in a real panel invented a spurious reliability gap of its own.
+        # A constant score collapses to a single bin, which is the honest diagram — one
+        # point, at the forecast's own value.
+        edges = np.unique(np.quantile(frame["p"].to_numpy(dtype=float), np.linspace(0.0, 1.0, bins + 1)))
+        if edges.size < 2:
+            frame["bin"] = 0
+        else:
+            edges = edges.copy()
+            edges[0], edges[-1] = -np.inf, np.inf
+            frame["bin"] = pd.cut(frame["p"], edges, labels=False, include_lowest=True)
     elif strategy == "uniform":
-        frame["bin"] = pd.cut(frame["p"], min(n_bins, max(2, len(frame))), labels=False)
+        frame["bin"] = pd.cut(frame["p"], bins, labels=False)
     else:
         raise ValueError(f"strategy must be 'quantile' or 'uniform', got {strategy!r}")
     grouped = (

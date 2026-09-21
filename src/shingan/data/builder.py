@@ -32,7 +32,16 @@ import pandas as pd
 
 from shingan.__about__ import DATA_SCHEMA_VERSION
 from shingan.config import ProjectConfig
-from shingan.data.schema import PANEL_COLUMNS, RiskLabel, panel_subset
+from shingan.data.schema import (
+    PANEL_COLUMNS,
+    RiskLabel,
+    event_column,
+    horizon_column,
+    label_column,
+    mask_column,
+    panel_subset,
+    source_of_record_column,
+)
 from shingan.data.synthetic import SyntheticDataset, generate_synthetic_dataset
 from shingan.eval.splits import SplitReport, assign_split_column
 from shingan.features.ratios import compute_ratios
@@ -264,8 +273,15 @@ def _text_features_and_context(
             & (news_frame["published"] > as_of - pd.Timedelta(days=news_window_days))
         ]
 
+        # Joined with a blank line, not a space. ``build_text_features`` re-segments the
+        # concatenated disclosure, and ``segment_items`` matches Item headings with a
+        # ``(?m)^`` anchor: joining with " " leaves every heading after the first stranded
+        # mid-line, so the document looks like it has one section, ``section_text`` finds
+        # neither risk factors nor MD&A, and ``risk_factor_token_share`` /
+        # ``mdna_token_share`` / ``neg_kw_density_mdna`` come out zero for every row
+        # without anything failing. The separator is part of the contract.
         disclosures = [
-            " ".join(group["text"].astype(str))
+            "\n\n".join(group["text"].astype(str))
             for _, group in ticker_filings.groupby("filed", sort=True)
         ]
         prior_length: float | None = None
@@ -390,6 +406,72 @@ def _date_gap(start: date, end: date) -> str:
     return f"up to {max(0, (end - start).days)} days"
 
 
+def load_cached_tables(config: ProjectConfig) -> RawTables:
+    """Load raw tables previously fetched by ``scripts/fetch_real.py``.
+
+    ``build_panel`` cannot fetch by itself — the adapters are interactive, rate-limited
+    and better run explicitly — so a real-data build reads the frames the fetch script
+    persisted under ``data.cache_dir`` (default ``data/raw/real/``). Prices,
+    fundamentals and filings must be present; news and events may be absent, in which
+    case empty frames stand in and the affected features and labels report
+    accordingly (news-derived counts go to zero, event-based labels are masked out).
+
+    Raises:
+        ValueError: If the cache directory or one of the required tables is missing.
+    """
+    from shingan.paths import ProjectPaths
+
+    candidates: list[Path] = []
+    if config.data.cache_dir:
+        candidate = Path(config.data.cache_dir)
+        candidates.append(candidate if candidate.is_absolute() else ProjectPaths.from_root(config.project.root).root / candidate)
+    candidates.append(ProjectPaths.from_root(config.project.root).root / "data" / "raw" / "real")
+    directory = next((item for item in candidates if (item / "prices.parquet").is_file()), None)
+    if directory is None:
+        raise ValueError(
+            "data.sources={config.data.sources} requires the network, but no source "
+            "tables were supplied and none were found under "
+            f"{[str(item) for item in candidates]}. Either run with sources=['synthetic'], "
+            "fetch the data with scripts/fetch_real.py (the adapters in "
+            "shingan.data.{edgar,news,prices} are unvalidated — see docs/02-data.md), "
+            "and retry, or pass the frames as RawTables."
+        )
+
+    required = ("prices", "fundamentals", "filings")
+    frames: dict[str, pd.DataFrame] = {}
+    for name in required:
+        path = directory / f"{name}.parquet"
+        if not path.is_file():
+            raise ValueError(
+                f"required real-data table {name} is missing at {path}. Run "
+                "scripts/fetch_real.py first, or restore the missing parquet file."
+            )
+        frames[name] = pd.read_parquet(path)
+    optional = ("news", "events")
+    for name in optional:
+        path = directory / f"{name}.parquet"
+        frames[name] = pd.read_parquet(path) if path.is_file() else pd.DataFrame()
+
+    logger.info(
+        "loaded real-data tables from %s: prices %d rows, fundamentals %d, filings %d, "
+        "news %d, events %d",
+        directory,
+        len(frames["prices"]),
+        len(frames["fundamentals"]),
+        len(frames["filings"]),
+        len(frames["news"]),
+        len(frames["events"]),
+    )
+    return RawTables(
+        prices=frames["prices"],
+        fundamentals=frames["fundamentals"],
+        filings=frames["filings"],
+        news=frames["news"],
+        events=frames["events"],
+        is_synthetic=False,
+    )
+
+
 def build_panel(
     config: ProjectConfig,
     *,
@@ -416,22 +498,24 @@ def build_panel(
     """
     if tables is None:
         if set(config.data.sources) != {"synthetic"}:
-            raise ValueError(
-                f"data.sources={config.data.sources} requires the network, but no source "
-                "tables were supplied. Either run with sources=['synthetic'], or fetch the "
-                "data with the adapters in shingan.data.{edgar,news,prices} and pass the "
-                "frames as RawTables. Those adapters are unvalidated — see docs/02-data.md."
+            # A real build: the fetch step has already run and its tables are on disk.
+            # Loading here (rather than requiring an explicit argument) is what lets
+            # `shingan data build` / `train structured` / `eval run` work unchanged on
+            # a real-data overlay.
+            tables = load_cached_tables(config)
+        else:
+            synthetic_config = config.data.synthetic.model_copy(
+                update={
+                    "start": config.data.start,
+                    "end": config.data.end,
+                    "n_companies": max(
+                        2, min(config.data.synthetic.n_companies, len(config.data.universe) or 12)
+                    ),
+                }
             )
-        synthetic_config = config.data.synthetic.model_copy(
-            update={
-                "start": config.data.start,
-                "end": config.data.end,
-                "n_companies": max(2, min(config.data.synthetic.n_companies, len(config.data.universe) or 12)),
-            }
-        )
-        dataset = generate_synthetic_dataset(synthetic_config)
-        tables = RawTables.from_synthetic(dataset)
-        logger.info("using the synthetic generator: %s", dataset.summary())
+            dataset = generate_synthetic_dataset(synthetic_config)
+            tables = RawTables.from_synthetic(dataset)
+            logger.info("using the synthetic generator: %s", dataset.summary())
     tables.assert_single_provenance()
     # Measured once, from the inputs, and used for every observability and truncation
     # decision below. Deriving it here rather than reading `config.data.end` directly
@@ -453,9 +537,22 @@ def build_panel(
     if grid.empty:
         raise ValueError("the filing table is empty, so there are no decision points to build")
     grid["as_of"] = pd.to_datetime(grid["as_of"])
-    grid["cik"] = grid["ticker"].map(lambda ticker: _synthetic_cik(str(ticker)))
-    grid["company_name"] = grid["ticker"].map(_company_name)
-    grid["sector"] = grid["ticker"].map(_sector)
+    # Provenance columns. The deterministic "Synthex ..." names and the 9-prefixed
+    # placeholder CIK exist so that a *synthetic* row stays identifiable after the
+    # `is_synthetic` column is dropped. Applying them to real rows would be the exact
+    # mislabelling this module's docstring warns about: "Synthex Financial GS" on a
+    # Goldman Sachs row would travel into the panel, the report and the dataset card.
+    # A real build therefore carries only what the fetch actually obtained — the CIK
+    # the filings table supplies, and the ticker as the name (this repository has no
+    # verified legal-name source) — and leaves a blank rather than inventing one.
+    if tables.is_synthetic:
+        grid["cik"] = grid["ticker"].map(lambda ticker: _synthetic_cik(str(ticker)))
+        grid["company_name"] = grid["ticker"].map(_company_name)
+        grid["sector"] = grid["ticker"].map(_sector)
+    else:
+        grid["cik"] = _real_cik_lookup(grid["ticker"], tables.filings)
+        grid["company_name"] = grid["ticker"].astype(str)
+        grid["sector"] = ""
 
     # 2. Technical features, joined backward onto the grid.
     technical = compute_technical_features(
@@ -531,13 +628,34 @@ def build_panel(
 
     # 9. Column order, then verification. Ordering first makes the leakage scan cheaper
     #    and the written file stable.
-    missing_columns = [column for column in PANEL_COLUMNS if column not in panel.columns]
+    #    A build may legitimately target a subset of the three labels (the Stage 2 run
+    #    evaluates tail_risk only, because the event sources for the other two are not
+    #    wired yet). Its label columns are then absent by design, so only the columns
+    #    belonging to *configured* labels are required.
+    configured_labels = {str(label) for label in definitions}
+    skipped_labels = [label for label in RiskLabel if str(label) not in configured_labels]
+    absent_by_design = {
+        column
+        for label in skipped_labels
+        for column in (
+            label_column(label),
+            mask_column(label),
+            event_column(label),
+            horizon_column(label),
+            source_of_record_column(label),
+        )
+    }
+    missing_columns = [
+        column
+        for column in PANEL_COLUMNS
+        if column not in panel.columns and column not in absent_by_design
+    ]
     if missing_columns:
         raise RuntimeError(
             f"the builder did not produce these dictionary columns: {missing_columns}. "
             "Add them here and to docs/02-data.md section 5."
         )
-    panel = panel[list(PANEL_COLUMNS)]
+    panel = panel[[column for column in PANEL_COLUMNS if column in panel.columns]]
     panel = panel.sort_values(["ticker", "as_of"]).reset_index(drop=True)
 
     _verify_panel(panel, config, definitions, data_end=data_end)
@@ -685,6 +803,26 @@ def _label_column_for_target(config: ProjectConfig) -> str:
     from shingan.data.schema import label_column
 
     return label_column(RiskLabel(config.labels.targets[0]))
+
+
+def _real_cik_lookup(tickers: pd.Series, filings: pd.DataFrame) -> pd.Series:
+    """Ticker → CIK from the filings table, blank when the fetch did not record one.
+
+    Blank rather than a placeholder. Every downstream use of this column is
+    provenance — it is on the reserved-name list and never reaches a model — so its
+    job is to be traceable, and a plausible-looking fake number is worse than an
+    empty string because it looks traceable and is not.
+    """
+    if "cik" not in filings.columns:
+        return pd.Series("", index=tickers.index, dtype=object)
+    mapping = (
+        filings[["ticker", "cik"]]
+        .dropna()
+        .drop_duplicates(subset=["ticker"], keep="last")
+        .assign(cik=lambda frame: frame["cik"].astype(str))
+        .set_index("ticker")["cik"]
+    )
+    return tickers.map(mapping).fillna("").astype(str)
 
 
 def _synthetic_cik(ticker: str) -> str:

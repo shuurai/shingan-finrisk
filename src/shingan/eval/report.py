@@ -981,7 +981,26 @@ class EvaluationReport:
         if not self.ablation.empty:
             lines.append("## 9. Ablation")
             lines.append("")
+            lines.append(
+                "One common fit mask and one common apply mask across all three rows, so "
+                "the difference between them is the model and not the sample."
+            )
+            lines.append("")
             lines.append(_frame_to_markdown(self.ablation))
+            lines.append("")
+            # The label "text" invites a reading the table cannot support, and the
+            # correction has to travel with the numbers rather than live in a docstring.
+            lines.append(
+                "> `structured` is the gradient-boosted model over the numeric feature "
+                "matrix. `text` is the TF-IDF baseline over the *rendered user prompt*, "
+                "and that prompt contains a `STRUCTURED_SIGNALS` block — it is the same "
+                "input the LoRA sees, which is what makes the comparison a comparison of "
+                "model classes rather than of modalities. `text` is therefore **not** a "
+                "text-only path: where the filing and news blocks are empty (no document "
+                "text fetched, no news source wired) it is a bag-of-words model over the "
+                "structured signals and nothing else. A claim about the information "
+                "content of disclosure text requires a run whose corpus is non-empty."
+            )
             lines.append("")
 
         if self.falsification:
@@ -1273,7 +1292,6 @@ def default_caveats(
     discovered afterwards.
     """
     caveats = [
-        "All metric values are targets-versus-achieved, not claims of attained performance.",
         "Panel rows are not independent; no i.i.d. p-value is reported anywhere in this project.",
         "The Sharpe ratio is computed on overlapping forward windows and is inflated; the "
         "Newey-West t-statistic is the number to quote.",
@@ -1283,12 +1301,28 @@ def default_caveats(
         "sampling standard deviation of a single-fold AUC already exceeds it, making the "
         "gate unreachable rather than strict.",
     ]
+    # The opening caveat has to follow the data, not the project's stage. On a synthetic
+    # panel nothing is measured and every figure is a target; on a real panel the figures
+    # *are* measurements, and telling the reader otherwise understates the work while
+    # hiding the limitation that actually matters, which is the positive count.
     if contains_synthetic_data:
+        caveats.insert(
+            0,
+            "All metric values are targets-versus-achieved, not claims of attained performance.",
+        )
         caveats.append(
             "The panel contains synthetic rows. Any positive result on synthetic data "
             "demonstrates that the pipeline is wired correctly; it is exactly zero evidence "
             "about real markets, because the text-versus-structured information split is "
             "assumed into the generator."
+        )
+    else:
+        caveats.insert(
+            0,
+            "Metrics are measured on real filings and real prices, but on a sample too small "
+            "to support a performance claim: they describe this universe over this window, "
+            "not the model's ability in general. Quote the interval, and check the positive "
+            "count before quoting the point estimate.",
         )
     if not real_data_evaluation:
         caveats.append(

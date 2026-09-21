@@ -1,10 +1,12 @@
 # Shingan 心眼
 
+[![ci](https://github.com/shuurai/shingan-finrisk/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/shuurai/shingan-finrisk/actions/workflows/ci.yml)
+
 **Evidence-grounded financial risk modelling.** An open-source proof of concept that asks whether *text* signals add measurable information beyond structured financial and market signals — and refuses to claim an answer until the ablation says so.
 
 > Shingan is an open-source proof of concept for a financial risk model built as two cooperating tracks. **Track A** is a calibrated gradient-boosted model over structured financial and market signals. **Track B** is a QLoRA instruction-tuned language model reading SEC filings and financial news. A thin **fusion** layer combines both and emits evidence-grounded risk assessments for three label families: credit, fraud/misstatement, and tail risk. The design target is ranking quality and calibration under strict point-in-time discipline with purged, embargoed time-series validation — **not** return forecasting.
 
-**Status: POC. No real-data results exist yet.** Everything in this repository runs end to end on **synthetic data**, which proves the pipeline is connected and nothing more. Every number in the documentation is a **target or gate**, not an achieved value.
+**Status: POC with a first real-data result, and that result is provisional.** The pipeline runs end to end on **synthetic data**, which proves it is connected and nothing more. Stage 2 has now also been executed once against real SEC and market data — 34 companies, one label (`tail_risk`), 39 positives of which 5 fall in the test block. The numbers below are real measurements on real filings and prices, but the sample is far too small to support a performance claim. The SEC filing *text* corpus has since been downloaded (2,222 primary documents) and the panel rebuilt with live text features, but the three-track evaluation has **not** been re-run on that panel yet — so every number quoted below still comes from the text-free run. Everywhere else, the numbers in the documentation are still **targets or gates**, not achieved values.
 
 - Repository: [`shuurai/shingan-finrisk`](https://github.com/shuurai/shingan-finrisk)
 - Maintainer: Shane (GitHub [`shuurai`](https://github.com/shuurai))
@@ -133,13 +135,14 @@ tests/              pytest 测试套件
 | 结构化轨（含校准） | 已实现·已验证 |
 | 文本基线（TF-IDF 类） | 已实现·已验证 |
 | 评测指标与报告渲染 | 已实现·已验证 |
-| SEC EDGAR 客户端 | 接口已定义·未验证 |
-| 价格数据适配器（yfinance / Stooq） | 接口已定义·未验证 |
+| SEC EDGAR 客户端 | 已实现·已验证（submissions、companyfacts、全文检索端点与 `/Archives` 正文均已在真实数据上跑通；正文语料尚未入库，见下） |
+| 价格数据适配器（yfinance / Stooq） | 已实现·已验证（yfinance 拿到 31/34 只的日线） |
 | 新闻适配器（FNSPID，离线数据集） | 接口已定义·未验证 |
 | QLoRA 训练 | 已实现·未验证 |
-| Fusion 层 | 已实现·未验证 |
-| **真实数据结果（AUC / KS / PR-AUC 等任何数字）** | **不存在** |
-| 三个 in-scope 标签的真实事件标注 | 设计已定·未实现 |
+| Fusion 层 | 已实现·已验证（真实数据上相对 structured-only 增益为 **负**） |
+| **真实数据结果（Stage 2 / `tail_risk` / 34 家公司 / 2221 行面板）** | **structured AUC 0.7686、KS 0.5873、PR-AUC 0.0258；text 基线 0.4074；fused 0.6554。test 仅 5 个正样本，不构成性能结论** |
+| 标签复核（`tail_risk` 全部 39 个正样本） | 已实现·已验证（独立重算，不一致率 0.00%） |
+| 三个 in-scope 标签的真实事件标注 | 设计已定·未实现（`default_risk` / `fraud_risk` 的事件源未接入） |
 | `publish hf` | 已实现·未验证 |
 | `liquidity_risk` / `event_driven_risk` / `macro_contagion_risk` | 超出 POC 范围 |
 
@@ -147,7 +150,15 @@ tests/              pytest 测试套件
 
 本仓库的合成数据 demo 只能证明**流水线可运行**——数据生成、as-of 检查、特征构造、两条轨训练、融合、切分、指标计算、报告渲染都接通了。它**不能**证明模型具有真实预测能力。合成数据里的信号是生成器人为植入的，指标高只反映实现与设计一致。
 
-真实数据结果目前不存在。EDGAR 客户端、价格与新闻适配器都是薄适配器，尚未对 live 端点验证过；在真实数据第一次跑通并有可复现报告之前，本套文档中出现的所有数字都应读作**目标值**，而不是达成值。
+Stage 2 已在真实数据上跑过一次，产物在 `artifacts/stage2/`。读那些数字时请注意以下几点，它们不是免责套话，而是当前结果的真实边界：
+
+- **test 块只有 5 个正样本。** AUC 0.7686 建立在 5 个正例上，任何一个正例换位都会显著改变它。按[评测](docs/05-evaluation.md)第 10 节，这触发 F8：不作为性能结论，只作为"管线在真实数据上能算出带区间（或明确无法给出区间）的指标"的证据。
+- **融合层没有增益。** fused 的 PR-AUC 比 structured-only 低 0.0075，区间跨零。文本轨目前没有提供可度量的增量，这正是本项目要回答的问题——答案目前是"没有"，而不是"有"。
+- **SEC 申报正文：已入库，但尚未在新面板上重跑评测。** Stage 2 运行期间 `www.sec.gov/Archives` 对本网络的任何 User-Agent 都返回 403（"Undeclared Automated Tool"），事后定位到真正的原因**不是 UA 的形状而是 UA 里联系邮箱的域名**：`research@shingan.dev` 之类的普通域名正常返回 200，`a@github.com` 以及浏览器 UA、`curl/8.4.0` 一律 403。下载器 `scripts/fetch_sec_docs.py`（3 并发、磁盘缓存、断点续传、原子写）随后把 2,222 份正文全部取回（0 失败，约 10 GB，56 分钟），并从缓存重建了 `filings.parquet`。面板已用真文本重建：`risk_factor_token_share` 在 2,221 行中有 1,774 行为非零、`neg_kw_density_mdna` 有 1,372 行非零（修复前这两列**全零**）。但 49 个配置特征里仍有 15 个零覆盖、在拟合时被剔除，且**这一次的三路评测还没有跑**——所以上表那个 fused 对比仍然是"文本为空"时的对比。可达性会再次变化，抓取器必须带磁盘缓存与断点续传。
+- **`default_risk` 与 `fraud_risk` 没有实现。** 它们的真实事件源（评级历史、执法行动）尚未接入，Stage 2 只评测 `tail_risk`。
+- **价格表缺 MRO / WBA / X。** 这三家有申报但没有价格序列，其行现在被正确标为不可观测（见 `artifacts/stage2/label_review.md` 第 5 节：修复前它们曾被当作负样本，并因此抬高过 structured 的 AUC）。
+
+除 Stage 2 列出的这几个数字外，本套文档中出现的其余数字都应读作**目标值**，而不是达成值。
 
 ## 文档
 

@@ -41,6 +41,7 @@ from shingan.data.builder import PROMPT_SIGNAL_COLUMNS, BuildResult, build_panel
 from shingan.data.schema import (
     RiskLabel,
     SourceType,
+    diagnose_gaps,
     panel_subset,
     quotes_are_verbatim,
 )
@@ -1184,6 +1185,16 @@ def assemble_report(result: PipelineResult, *, run_id: str | None = None) -> Eva
     outcome = result.headline_outcome()
     headline = outcome.headline() if outcome else None
     identifier = run_id or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    # Provenance decides two of the standing caveats, so it is read from the panel
+    # rather than assumed. `default_caveats()` defaults to the synthetic case, and
+    # calling it with no arguments — as this function used to — made every real-data
+    # report carry "the panel contains synthetic rows" and "no real-data evaluation has
+    # been performed" underneath its own real-data numbers. A caveat that is false
+    # about the run it is attached to is worse than a missing one: it teaches the
+    # reader to skim the section that exists to stop them misreading the numbers.
+    is_synthetic = bool(result.build.metadata.get("is_synthetic", True))
+    if "is_synthetic" in result.build.panel.columns and len(result.build.panel):
+        is_synthetic = bool(result.build.panel["is_synthetic"].astype(bool).any())
     # Guarded as a whole rather than per field: `calibration` was read via
     # `(outcome.calibration or {})`, which protects against an empty dict but not against
     # `outcome` itself being None — the same mistake the surrounding `if outcome else`
@@ -1270,8 +1281,124 @@ def assemble_report(result: PipelineResult, *, run_id: str | None = None) -> Eva
         synthetic_stress=pd.DataFrame(),
         ablation=ablation,
         rolling_folds=_folds_table(result),
-        caveats=default_caveats() + result.notes + _unfitted_notes(result),
+        caveats=(
+            default_caveats(
+                contains_synthetic_data=is_synthetic,
+                real_data_evaluation=not is_synthetic,
+            )
+            + _data_gap_notes(outcome)
+            + _window_gap_notes(result.build.panel)
+            + result.notes
+            + _unfitted_notes(result)
+        ),
     )
+
+
+def _window_gap_notes(panel: pd.DataFrame) -> list[str]:
+    """Disclose calendar time that no split window covers, and what it costs.
+
+    A row outside every nominal window is assigned ``excluded`` and quietly leaves the
+    sample. That is usually a handful of days at the panel's edges. When it is a whole
+    calendar year it is not a detail: in the Stage 2 run 2020 sits in no window and holds
+    27 of the 39 observable positives, so the reported base rate (1.0%) is half the
+    panel's own (2.2%) and the biggest drawdown episode in the sample is neither trained
+    on nor evaluated. A reader cannot reconcile those two numbers without being told.
+
+    Only rows whose label window has closed are counted; rows beyond the end of the data
+    are terminal truncation, which is expected and already recorded elsewhere.
+    """
+    if panel.empty or "split" not in panel.columns or "as_of" not in panel.columns:
+        return []
+    excluded = panel.loc[panel["split"] == "excluded"]
+    if excluded.empty:
+        return []
+
+    notes: list[str] = []
+    years = sorted({int(year) for year in excluded["as_of"].dt.year.dropna().unique()})
+    for column in sorted(name for name in panel.columns if name.startswith("label_")):
+        label = column[len("label_") :]
+        mask_column = f"label_mask_{label}"
+        if mask_column not in panel.columns:
+            continue
+        observable = panel[mask_column].astype(bool)
+        excluded_observable = excluded[mask_column].astype(bool)
+        total_positives = int(panel.loc[observable, column].sum())
+        excluded_positives = int(excluded.loc[excluded_observable, column].sum())
+        if excluded_positives == 0:
+            continue
+        share = excluded_positives / total_positives if total_positives else float("nan")
+        notes.append(
+            f"`{label}`: {excluded_positives} of {total_positives} observable positive(s) "
+            f"({share:.0%}) fall in rows no split window covers — calendar year(s) "
+            f"{', '.join(str(year) for year in years)}, base rate "
+            f"{excluded.loc[excluded_observable, column].mean():.1%} inside that block "
+            f"against {panel.loc[observable, column].mean():.1%} for the panel. Those rows "
+            "are neither trained on nor evaluated. Remedy: make the windows adjacent in the "
+            "data overlay (set `valid.end` to the day before `test.start`) or move "
+            "`test.start` back to cover the gap; the purge margin will then decide the "
+            "boundary instead of the calendar."
+        )
+    return notes
+
+
+def _data_gap_notes(outcome: LabelOutcome | None) -> list[str]:
+    """Caveats for inputs the run did not have, and for what the fusion actually fitted.
+
+    Two things a reader cannot infer from the metric tables and would otherwise have to
+    take on trust.
+
+    First, a model that silently trains on 34 of 49 configured features: "the report
+    shows a strong structured result" and "the report shows a strong structured result
+    computed without 15 of the 49 configured features, six of which have no data source
+    at all" are different claims and only one of them is true.
+
+    Second, the fusion's *fitted* kind. ``fusion.kind`` in the configuration is a
+    request; a validation fold holding a single positive cannot support a logistic
+    stacker, so the layer falls back to a rank average and the headline "fused" row is
+    then an average, not a fitted stack. Without this note the fused number reads as
+    evidence about stacking when it is evidence about arithmetic.
+
+    Everything here is read off the fitted models rather than the configuration: the
+    configuration says what was *asked* for, and the whole point is to report what was
+    *there*.
+    """
+    notes: list[str] = []
+    if outcome is None:
+        return notes
+
+    structured = outcome.models.get(PATH_STRUCTURED)
+    dropped = list(getattr(structured, "dropped_features", []) or [])
+    if dropped:
+        # One line per source, with the remedy. A bare count of dropped features invites
+        # the reader to assume they were unobtainable; several are one fetch or one symbol
+        # away, and the difference changes what the reader should do next.
+        for gap in diagnose_gaps(dropped):
+            names = ", ".join(gap["features"])
+            notes.append(
+                f"{gap['count']} configured feature(s) held no observation anywhere in the "
+                f"training block and were dropped before fitting — source `{gap['source']}`: "
+                f"{names}. Remedy: {gap['advice']}."
+            )
+
+    baseline = outcome.models.get(PATH_TEXT)
+    for warning in list(getattr(baseline, "warnings", []) or []):
+        notes.append(f"text track: {warning}")
+
+    fusion = outcome.models.get(PATH_FUSED)
+    diagnostics = dict(getattr(fusion, "diagnostics", {}) or {})
+    if diagnostics:
+        notes.append(
+            f"the fusion layer fitted as `{diagnostics.get('kind', 'unknown')}` on the "
+            f"`{diagnostics.get('fit_split', 'unknown')}` fold "
+            f"({diagnostics.get('n_fit_rows', '?')} rows, "
+            f"{diagnostics.get('positives_fit', '?')} positive(s)); `fusion.kind` in the "
+            "configuration is a request, and what can be fitted is decided by the fold."
+        )
+        if diagnostics.get("note"):
+            notes.append(f"fusion layer: {diagnostics['note']}")
+        if diagnostics.get("warning"):
+            notes.append(f"fusion layer: {diagnostics['warning']}")
+    return notes
 
 
 def _regime_note(result: PipelineResult) -> str:

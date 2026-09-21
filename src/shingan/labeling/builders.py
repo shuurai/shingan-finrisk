@@ -320,14 +320,24 @@ def apply_risk_labels(
                 ],
                 dtype=bool,
             )
-            mask_values[rows_sorted] = observable
             sources[rows_sorted] = definition.source_of_record
 
+            # ``_tail_risk_labels`` narrows ``observable`` further, because a closed
+            # window is not the same as a usable price path. The tightened array has to
+            # be written to the mask *after* the label function returns. Writing it here
+            # instead — as this used to — publishes "observable" for rows whose forward
+            # drawdown does not exist, and those rows then enter training, calibration
+            # and evaluation as legitimate negatives while carrying an entirely
+            # missing feature block. That teaches the model "all missing means safe"
+            # and inflates every discrimination metric.
             if label is RiskLabel.TAIL_RISK:
-                label_values[rows_sorted] = _tail_risk_labels(
+                label_values[rows_sorted], observable = _tail_risk_labels(
                     result, rows_sorted, observable, definition
                 )
+                mask_values[rows_sorted] = observable
                 continue
+
+            mask_values[rows_sorted] = observable
 
             ticker_events = event_frame.loc[event_frame[ticker_column] == ticker]
             if ticker_events.empty:
@@ -390,12 +400,17 @@ def _tail_risk_labels(
     rows_sorted: np.ndarray,
     observable: np.ndarray,
     definition: LabelDefinition,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     """Tail-risk positives from the forward drawdown column.
 
     A missing forward drawdown means the price window is incomplete, which is the
     same condition as an unclosed label window, so those rows stay zero and
     unobservable rather than becoming negative examples.
+
+    Returns:
+        ``(labels, observable)``. The observable array is returned rather than mutated
+        in place because the caller must write the narrowed version to the mask column;
+        relying on in-place mutation is what let unobservable rows keep a true mask.
     """
     column = "fwd_max_drawdown_30d"
     if column not in panel.columns:
@@ -405,14 +420,14 @@ def _tail_risk_labels(
             column,
             definition.label,
         )
-        observable[:] = False
-        return np.zeros(len(rows_sorted), dtype="int8")
+        observable = np.zeros(len(rows_sorted), dtype=bool)
+        return np.zeros(len(rows_sorted), dtype="int8"), observable
 
     threshold = float(definition.parameters.get("drawdown_threshold", -0.30))
     drawdown = pd.to_numeric(panel[column].iloc[rows_sorted], errors="coerce").to_numpy(dtype=float)
     breached = np.isfinite(drawdown) & (drawdown <= threshold)
-    observable &= np.isfinite(drawdown)
-    return np.where(observable & breached, 1, 0).astype("int8")
+    observable = observable & np.isfinite(drawdown)
+    return np.where(observable & breached, 1, 0).astype("int8"), observable
 
 
 def _validate_events(events: pd.DataFrame | None) -> pd.DataFrame:

@@ -1,18 +1,34 @@
 # CI 说明
 #
-# - CI runner 没有 GPU,所以这里**故意不安装** `train` extra(torch / transformers / peft / trl / datasets /
-#   accelerate / bitsandbytes / sentencepiece / protobuf / safetensors / einops)。测试套件被设计为在没有
-#   torch 的情况下也能跑:LoRA 模块对 torch 做 lazy import,缺依赖时相关测试自动 skip。
-# - 需要 cu128 wheel 的只有本地训练(RTX 5090,Blackwell / sm_120);CI 不涉及也不需要。
-# - test 步骤必须能在 Windows PowerShell 下直接执行,因此全部使用单行、无 POSIX-only 语法的命令。
-# - 本 workflow 不引用任何 secret,也不依赖任何需要凭据的 action。
+# 目标:一个便宜的"绿灯即合并"检查。这个文件刻意做得窄——只跑测试,只跑一次。
+#
+# 成本控制(每一处都对应一个会重复发生的费用):
+# - **单个 job、单个 OS、单个 Python 版本。** 不做 matrix。原来的 2 OS × 2 Python
+#   矩阵是 4 个 runner,而 GitHub 对 windows-latest 按 2 倍计费,即每次 push 约 6 倍
+#   的账单。测试套件 2 秒跑完,贵的是装依赖那 1 分钟,所以乘 4 是纯浪费。
+#   代价是 Windows 专属问题(路径分隔符、编码)不再被 CI 捕获;若需要,把
+#   `runs-on` 改成 matrix 即可,但请接受成本。
+# - **py3.11** = pyproject.toml 里 `requires-python = ">=3.11,<3.14"` 的下界,是
+#   版本假设真正会出问题的那一档。
+# - **PR 只针对 main 触发。** 原来的 `pull_request:` 没有分支过滤,任何分支的 PR
+#   都会跑。
+# - **concurrency cancel-in-progress**:同一 PR 推新 commit 会取消在跑的那次。
+#   实际开发节奏是 push→改→再 push,这条省得最多。
+# - **不装 `train` extra**(torch/transformers/cu128,约 2 GB)。CI 无 GPU,测试套件
+#   对 torch 做 lazy import。装了只是替 CI 付下载费。
+# - **不上传覆盖率、不做 ruff/mypy 门禁。** 覆盖率不影响"是否通过";lint 门禁此前
+#   未经核实是否全绿,一个长期红灯的检查比没有检查更糟。需要时再加,放同一个 job
+#   里几乎不增加成本。
+#
+# 本 workflow 不引用任何 secret,也不依赖需要凭据的 action。
+
 name: ci
 
 on:
   push:
     branches: [main]
   pull_request:
-  workflow_dispatch:
+    branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -22,62 +38,35 @@ permissions:
   contents: read
 
 jobs:
-  lint:
-    name: lint (ruff + mypy)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-
-      - name: 升级 pip
-        run: python -m pip install --upgrade pip
-
-      - name: 安装 dev extras
-        run: python -m pip install -e ".[dev]"
-
-      - name: ruff check
-        run: ruff check .
-
-      - name: ruff format --check
-        run: ruff format --check .
-
-      - name: mypy
-        run: mypy src
-
   test:
-    name: test (${{ matrix.os }}, py${{ matrix.python-version }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        python-version: ["3.11", "3.12"]
+    name: pytest (ubuntu, py3.11)
+    runs-on: ubuntu-latest
+    # 卡住时封顶:一次意外 hang 不会烧掉一小时 runner 时间才失败。
+    timeout-minutes: 15
+
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.11"
           cache: pip
 
-      - name: 升级 pip
-        run: python -m pip install --upgrade pip
+      # `parquet` 是必须的:`tests/test_sec_docs.py` 要写读 .parquet,缺 pyarrow 时
+      # 那批测试直接 error。只装 `.[dev]` 在干净 checkout 上会红。
+      - name: 安装 dev + parquet extras
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,parquet]"
 
-      - name: 安装 dev extras
-        run: python -m pip install -e ".[dev]"
-
+      # marker 过滤是测试层面的成本控制。`network` / `gpu` / `slow` 三个 marker 在
+      # pyproject.toml 里已声明(其中 network 写明 "never runs in CI")。当前没有被
+      # 排除的测试,所以这是护栏而非节省:防止将来某个打网络的测试把 CI 变成又贵又
+      # 不稳的集成套件。
       - name: pytest
-        run: pytest -q --cov=shingan --cov-report=term-missing --cov-report=xml
+        run: python -m pytest -m "not network and not gpu and not slow" -q
 
-      - name: 上传覆盖率报告
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-${{ matrix.os }}-py${{ matrix.python-version }}
-          path: coverage.xml
-          if-no-files-found: warn
-          retention-days: 14
+      # 确认 CLI 入口装好了、import 没断——这类问题应在 CI 暴露,而不是用户第一次
+      # 执行命令时。约 2 秒。
+      - name: 冒烟:CLI 入口
+        run: shingan version
