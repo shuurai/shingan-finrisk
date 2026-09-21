@@ -51,13 +51,19 @@ data/external/*
 !data/**/.gitkeep
 
 # --- Model artifacts --------------------------------------------------------
-artifacts/
-models/
-checkpoints/
-outputs/
-wandb/
-mlruns/
-runs/
+# Anchored to the repository root on purpose. An unanchored `models/` also matches
+# `src/shingan/models/`, which silently kept the entire model layer out of git: every
+# clone failed with `ModuleNotFoundError: No module named 'shingan.models'` while local
+# runs, which read the working tree, passed. The other names below (`runs/`, `outputs/`,
+# `checkpoints/`) are equally generic and are anchored for the same reason. Anything
+# produced at runtime belongs under `artifacts/`, which is rooted here too.
+/artifacts/
+/models/
+/checkpoints/
+/outputs/
+/wandb/
+/mlruns/
+/runs/
 *.ckpt
 *.pt
 *.pth
