@@ -182,7 +182,7 @@
 | 模型 | `shuurai/shingan-qwen3-14b-finrisk` | QLoRA adapter + merged 权重（择一，卡中说明） |
 | 数据集 | `shuurai/shingan-finrisk-labels` | 标签 + 派生特征，**不含**原始新闻正文（见[数据](02-data.md)第 6 节） |
 | Benchmark | `shuurai/shingan-bench` | 评测集与基线结果，含全部置信区间 |
-| 代码 | GitHub `shuurai/shingan` | Apache-2.0 |
+| 代码 | GitHub `shuurai/shingan-finrisk` | Apache-2.0 |
 | 文档 | 本文档集 | 含[模型卡](../templates/model_card.md)、[数据集卡](../templates/dataset_card.md) |
 | 存档 | Zenodo DOI | 与 GitHub release tag 绑定，保证可引用 |
 

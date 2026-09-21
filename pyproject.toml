@@ -95,11 +95,11 @@ dev = [
 shingan = "shingan.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/shuurai/shingan"
-Documentation = "https://github.com/shuurai/shingan/tree/main/docs"
-Repository = "https://github.com/shuurai/shingan"
-Issues = "https://github.com/shuurai/shingan/issues"
-Changelog = "https://github.com/shuurai/shingan/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/shuurai/shingan-finrisk"
+Documentation = "https://github.com/shuurai/shingan-finrisk/tree/main/docs"
+Repository = "https://github.com/shuurai/shingan-finrisk"
+Issues = "https://github.com/shuurai/shingan-finrisk/issues"
+Changelog = "https://github.com/shuurai/shingan-finrisk/blob/main/CHANGELOG.md"
 "Model card" = "https://huggingface.co/shuurai/shingan-qwen3-14b-finrisk"
 "Dataset card" = "https://huggingface.co/datasets/shuurai/shingan-finrisk-labels"
 

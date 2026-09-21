@@ -32,7 +32,7 @@ the project that a reviewer cannot reproduce.**
 ### Windows 11 (the reference machine)
 
 ```powershell
-git clone https://github.com/shuurai/shingan.git
+git clone https://github.com/shuurai/shingan-finrisk.git
 cd shingan
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
@@ -49,7 +49,7 @@ CPU wheel.
 ### macOS / Linux
 
 ```bash
-git clone https://github.com/shuurai/shingan.git
+git clone https://github.com/shuurai/shingan-finrisk.git
 cd shingan
 python3.12 -m venv .venv
 source .venv/bin/activate

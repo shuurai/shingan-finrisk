@@ -79,5 +79,5 @@ results, and no claim of predictive skill on real companies is made.
   with an RTX 5090 (32 GB, sm_120), which requires PyTorch built for CUDA 12.8
   and a bitsandbytes build from the 12.8-12.9 line.
 
-[Unreleased]: https://github.com/shuurai/shingan/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/shuurai/shingan/releases/tag/v0.1.0
+[Unreleased]: https://github.com/shuurai/shingan-finrisk/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/shuurai/shingan-finrisk/releases/tag/v0.1.0

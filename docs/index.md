@@ -2,7 +2,7 @@
 
 **Shingan**（心眼）是一个开源研究项目，目标是验证"文本信号能否在结构化财务/量价信号之外，为上市公司风险预测提供可度量的增量信息"。它采用双轨架构：Track A 用 gradient-boosted trees 拟合结构化信号（财务比率 + 市场微观结构/技术特征），Track B 用 QLoRA 指令微调的 LLM 读取非结构化文本（10-K/10-Q/8-K 摘录 + 新闻），再由一层轻量 fusion 层把两条轨的分数融合。项目当前处于 POC 阶段，以合成数据端到端跑通流水线，真实数据上的预测能力**尚未得到任何验证**。
 
-- 仓库：`shuurai/shingan`
+- 仓库：`shuurai/shingan-finrisk`
 - 维护者：Shane（GitHub `shuurai`），Windows 11 + RTX 5090 (32 GB)
 - License：Apache-2.0
 

@@ -16,7 +16,7 @@
 
 | artifact | 名称 |
 | --- | --- |
-| GitHub 仓库 | `shuurai/shingan` |
+| GitHub 仓库 | `shuurai/shingan-finrisk` |
 | Python 包与 CLI | `shingan` |
 | Hugging Face 模型 | `shuurai/shingan-qwen3-14b-finrisk` |
 | Hugging Face 数据集 | `shuurai/shingan-finrisk-labels` |

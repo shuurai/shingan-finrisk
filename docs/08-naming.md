@@ -7,7 +7,7 @@
 | artifact | 名称 |
 | --- | --- |
 | 项目名 | Shingan（心眼，"the mind's eye"） |
-| GitHub 仓库 | `shuurai/shingan` |
+| GitHub 仓库 | `shuurai/shingan-finrisk` |
 | Python 包与 CLI | `shingan` |
 | Hugging Face 模型 | `shuurai/shingan-qwen3-14b-finrisk` |
 | Hugging Face 数据集 | `shuurai/shingan-finrisk-labels` |
@@ -83,7 +83,7 @@
 
 | # | 位置 | 当前值 | 是否影响用户 | 说明 |
 | --- | --- | --- | --- | --- |
-| 1 | GitHub 仓库名 | `shuurai/shingan` | 是 | GitHub 会自动重定向旧 URL，但 HF 卡片与文档中的链接需要更新 |
+| 1 | GitHub 仓库名 | `shuurai/shingan-finrisk` | 是 | GitHub 会自动重定向旧 URL，但 HF 卡片与文档中的链接需要更新。词根仍是 `shingan`，后缀 `-finrisk` 仅用于区分 GitHub 仓库 |
 | 2 | Python 包目录 | `src/shingan/` | 是 | **破坏性变更**，import 路径改变 |
 | 3 | CLI 命令名 | `shingan` | 是 | **破坏性变更** |
 | 4 | `pyproject.toml` 的 `name`、`[project.scripts]` 入口 | `shingan` | 是 | 与 2、3 同步改 |
@@ -95,7 +95,7 @@
 | 10 | `templates/model_card.md` 的 frontmatter 与正文 | 含模型名 | 否 | 模板，改起来零成本 |
 | 11 | `templates/dataset_card.md` | 含数据集名 | 否 | 同上 |
 | 12 | `docs/` 全部文档的标题与正文 | `Shingan` / `shingan` | 否 | 机械替换，但需人工复核语义通顺 |
-| 13 | `README.md`（由他人维护） | — | 是 | **不在本套文档的修改范围内**，改名时需单独协调 |
+| 13 | `README.md`（仓库根，本套文档维护） | 含项目名与仓库链接 | 是 | 与 12 一并机械替换；同时更新 `pyproject.toml` 的 `readme` 字段指向的文件名 |
 | 14 | Zenodo DOI 元数据 | 与 release tag 绑定 | 是 | 旧 DOI 不可改，需发新版本并保留旧版记录 |
 | 15 | 已发布的报告与 runs 目录中的元数据 | — | 否 | 历史记录不追溯修改，保留原名并加注释 |
 
