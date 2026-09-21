@@ -1,0 +1,61 @@
+# =====================================================================================
+# Shingan — POC data overlay (Stage 2)
+# =====================================================================================
+# Deep-merged onto `configs/default.yaml`. This file chooses *which companies* and
+# *which years*, and nothing else.
+#
+# Why a mixed large-cap basket rather than ten technology names
+# -------------------------------------------------------------
+# The obvious POC universe for an AI project is ten large technology companies. It is
+# the wrong choice here, and the reason is the labels. Big tech has very few credit
+# rating actions, very few restatements and almost no payment defaults, so an all-tech
+# basket drives `default_risk` and `fraud_risk` base rates toward zero and the POC
+# reports "insufficient evidence" for two of its three labels — not because the
+# pipeline is broken but because the sample cannot contain the event.
+#
+# This basket deliberately mixes sectors *and* includes names that were actually under
+# credit stress in the window (GE through its 2018 restructuring, Ford and Macy's
+# through the 2020 shock, Walgreens through its 2023-2024 downgrades). `docs/02-data.md`
+# section 4.4 makes the same argument from the other direction: a universe selected on
+# "still a member today" is survivorship-biased, and the bias works by deleting exactly
+# the failures a risk model is supposed to find.
+#
+# This is a *real* consideration, not a synthetic-data trick: the synthetic generator
+# only reads the length of this list, not the tickers. It matters from Stage 2 onward,
+# when the EDGAR and price fetchers use these identifiers.
+#
+# What this stage is and is not
+# -----------------------------
+# `docs/07-roadmap.md` Stage 2 is scoped as **data-pipeline validation, not performance
+# validation**, and lists the consequences:
+#
+#   * With 5-10 companies the cross-sectional quintile backtest is not meaningful. The
+#     evaluation must mark `eval/backtest.py` output as not applicable and report only
+#     IC and the classification metrics. Do not present a quintile spread built on ten
+#     companies as evidence.
+#   * `fraud_risk` may have zero positives in a two-year window. That is handled by the
+#     report (F8) rather than by lowering the threshold.
+#
+# For a run whose purpose is to exercise the whole pipeline end to end, use
+# `configs/data/demo.yaml` instead, which raises `synthetic.base_rate_multiplier`.
+
+data:
+  # Ten companies, deliberately not all one sector. Financials 2, industrials 2,
+  # energy 1, telecom 1, consumer/auto 3, healthcare distribution 1.
+  universe: [JPM, GS, GE, CAT, BA, XOM, T, F, M, WBA]
+  start: 2010-01-01
+  end: 2024-12-31
+
+  # Synthetic only. The real fetchers exist but are unvalidated (docs/02-data.md), and
+  # `build_panel` raises if you select one without supplying tables.
+  sources: [synthetic]
+  offline: true
+
+  # Kept equal to `data.*` so the generator window matches the analysis window: a
+  # generator that produced fewer years than the split asks for would show up as a
+  # mysterious empty block rather than as a configuration error.
+  synthetic:
+    n_companies: 10
+    start: 2010-01-01
+    end: 2024-12-31
+    rows_per_year: 4

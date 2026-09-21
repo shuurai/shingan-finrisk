@@ -1,0 +1,106 @@
+# =====================================================================================
+# Shingan — QLoRA training overlay (Track B)
+# =====================================================================================
+# Deep-merged onto `configs/default.yaml` by `shingan train lora`.
+#
+# Every value here is chosen for one specific constraint: **this has to run on a
+# Windows machine with one RTX 5090 (32 GB, Blackwell, sm_120) and no WSL**, because
+# that is the machine the project is trained on. `docs/06-windows-setup.md` has the
+# setup; this file is the configuration side of the same set of decisions, and the
+# comments below say which value would be different on Linux and why.
+#
+# Read `docs/04-training.md` section 2.2 before changing anything here. The short
+# version of the three decisions that are not free parameters:
+#
+# 1. **`attn_implementation: sdpa`, never flash-attn.** flash-attn has no working
+#    Windows build and building it requires a Linux toolchain. sdpa is slower and
+#    correct; that is the right trade when the alternative does not install.
+# 2. **`packing: false`.** Packing concatenates short samples across their prompt
+#    boundaries. For instruction tuning that destroys per-example supervision —
+#    the model is trained to continue one company's answer into the next company's
+#    question. `shingan.models.lora.train_lora` asserts this is false rather than
+#    trusting the file.
+# 3. **`dataloader_num_workers: 0`.** Windows does not fork, so every worker
+#    re-imports torch and re-touches the CUDA context. Zero workers is slower per
+#    batch and far more reliable.
+
+lora:
+  base_model: Qwen/Qwen3-14B
+
+  # -----------------------------------------------------------------------------------
+  # Quantisation. 4-bit nf4 with double quantisation and bf16 compute is the standard
+  # QLoRA recipe; double quantisation saves roughly 0.4 bits per parameter, which on a
+  # 14B model is about 0.7 GB — enough to matter against a 32 GB budget.
+  # -----------------------------------------------------------------------------------
+  load_in_4bit: true
+  bnb_4bit_quant_type: nf4
+  bnb_4bit_use_double_quant: true
+  bnb_4bit_compute_dtype: bfloat16
+
+  # -----------------------------------------------------------------------------------
+  # Adapter. r=32 over the attention projections only.
+  #
+  # The task is small-sample discrimination on a few hundred instruction examples, not
+  # knowledge injection, so capacity is not the constraint. Adding MLP projections
+  # roughly doubles trainable parameters and, on a dataset this size, buys overfitting
+  # rather than accuracy.
+  # -----------------------------------------------------------------------------------
+  lora_r: 32
+  lora_alpha: 64
+  lora_dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj]
+  bias: none
+
+  # 4096 tokens. A prompt holds the structured signal block plus up to eight filings and
+  # a handful of news items; `build_sft_examples` reports how many examples overflow
+  # this, and that count is part of the run metadata rather than a silent truncation.
+  max_seq_length: 4096
+
+  # -----------------------------------------------------------------------------------
+  # Optimisation. lr 1e-4 with cosine decay is the QLoRA convention; the effective
+  # batch is 16 (1 x 16 gradient accumulation), which is what actually matters for
+  # stability at this learning rate.
+  # -----------------------------------------------------------------------------------
+  learning_rate: 0.0001
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.03
+  num_train_epochs: 3
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 16
+  gradient_checkpointing: true
+
+  # paged_adamw_8bit keeps the optimiser state on the host and pages it back in: on a
+  # 14B model the 8-bit optimiser state is still several GB, and paging is what stops a
+  # long sequence from OOM-ing mid-epoch.
+  optim: paged_adamw_8bit
+
+  # bf16 on, fp16 off. Blackwell has native bf16; enabling both is a silent numerical
+  # bug rather than an error.
+  bf16: true
+  fp16: false
+
+  attn_implementation: sdpa
+  packing: false
+  dataloader_num_workers: 0
+
+  eval_strategy: epoch
+  save_total_limit: 3
+  logging_steps: 10
+  # No experiment tracker: it is an optional dependency, and a training run that fails
+  # because a tracker is unreachable is a bad first experience on a fresh machine.
+  report_to: none
+  max_grad_norm: 1.0
+
+  # Only set this to run the VRAM sizing exercise in docs/04-training.md section 2.3,
+  # which packs batches up to a character budget to measure throughput. It is not a
+  # training setting: it changes what one "example" is.
+  packing_max_chars: null
+
+  # `single` places the whole model on one device. `auto` would shard across GPUs, and
+  # there is one.
+  device_map: single
+
+  # Windows MAX_PATH is 260 characters by default and these paths nest deeply under the
+  # repository. Keep the output directory short. See docs/06-windows-setup.md.
+  output_dir: artifacts/lora

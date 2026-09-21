@@ -1,0 +1,122 @@
+name: Bug report
+description: 报告可复现的缺陷(崩溃、报错、结果与文档不符等)。
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请尽量填完整,尤其是**精确命令**和 `shingan doctor` 的输出 —— 缺了这两项通常无法定位问题。
+        安全类问题请勿在此公开提交,按 SECURITY 说明私下联系。
+
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: 发生了什么
+      description: 用一两句话描述现象,不要只写"跑不起来"。
+      placeholder: "例如:执行 `shingan demo` 到标签统计阶段时抛 KeyError 且缺少 tail_risk。"
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 复现步骤(精确命令)
+      description: 从 clean checkout 开始,按顺序写出完整命令,包括你改动过的配置或参数。
+      placeholder: |
+        python -m pip install -e ".[dev]"
+        shingan demo
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_actual
+    attributes:
+      label: 期望结果 vs. 实际结果
+      description: 先说期望,再说实际;有报错请贴 traceback 的最后一段。
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        ## 环境
+
+  - type: input
+    id: os
+    attributes:
+      label: 操作系统
+      description: 写清发行版与版本;Windows 请注明是 Windows 11 还是其他。
+      placeholder: 例如:Windows 11 23H2 / Ubuntu 24.04 / macOS 15.3
+    validations:
+      required: true
+
+  - type: input
+    id: python_version
+    attributes:
+      label: Python 版本
+      description: 输出 `python -V` 的结果(支持 >=3.11,<3.14;Windows 推荐 3.12)。
+      placeholder: 例如:Python 3.12.6
+    validations:
+      required: true
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU
+      description: 显卡型号与显存;纯 CPU 请写 `CPU only`。
+      placeholder: 例如:NVIDIA RTX 5090 32 GB (Blackwell, sm_120) / CPU only
+    validations:
+      required: true
+
+  - type: dropdown
+    id: train_extra
+    attributes:
+      label: 是否安装了 `train` extra
+      description: 指 torch / transformers / peft / trl 等训练依赖是否已安装。
+      options:
+        - label: 未安装(仅核心依赖或 dev)
+          value: not_installed
+        - label: 已安装(可本地训练)
+          value: installed
+        - label: 不确定
+          value: unknown
+    validations:
+      required: true
+
+  - type: input
+    id: torch_version
+    attributes:
+      label: torch 版本
+      description: 输出 `python -c "import torch; print(torch.__version__)"`;未安装写 `N/A`。请注明是否以 `+cu128` 结尾。
+      placeholder: 例如:2.8.0+cu128 / 2.8.0 / N/A
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor_output
+    attributes:
+      label: "`shingan doctor` 的输出"
+      description: 请原样粘贴;若该命令本身失败,请贴出报错并说明。
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志与 traceback
+      description: 相关的完整日志;较长时可放在 gist 或代码块里。
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: 确认
+      options:
+        - label: 我确认本 issue 不构成投资建议,内容仅为技术缺陷报告。
+          required: true
+        - label: 我确认没有粘贴任何机密数据(未公开财报、付费墙内容、NDA 材料、个人隐私数据等)。
+          required: true

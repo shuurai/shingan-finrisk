@@ -1,0 +1,33 @@
+cff-version: 1.2.0
+message: "If you use this software, its released models or its label dataset, please cite it as below."
+title: "Shingan: evidence-grounded financial risk modelling"
+abstract: >-
+  Shingan is an open-source proof of concept for a financial risk model built as two
+  cooperating tracks. Track A is a calibrated gradient-boosted model over structured
+  financial and market signals. Track B is a QLoRA instruction-tuned language model
+  reading SEC filings and financial news. A thin fusion layer combines both and emits
+  evidence-grounded risk assessments for three label families: credit (rating
+  downgrade or bankruptcy within 365 days), fraud and misstatement (restatement,
+  enforcement action or non-standard audit opinion within 730 days), and tail risk
+  (drawdown worse than -30% over 30 trading days). The design target is ranking
+  quality and calibration under strict point-in-time discipline with purged,
+  embargoed time-series validation, not return forecasting.
+authors:
+  - name: "Shane (shuurai)"
+license: Apache-2.0
+license-url: "https://www.apache.org/licenses/LICENSE-2.0"
+repository-code: "https://github.com/shuurai/shingan"
+url: "https://github.com/shuurai/shingan"
+version: "0.1.0"
+date-released: "2026-09-21"
+keywords:
+  - financial risk
+  - credit risk
+  - fraud detection
+  - QLoRA
+  - LoRA
+  - large language models
+  - SEC EDGAR
+  - calibration
+  - purged walk-forward
+  - reproducible research

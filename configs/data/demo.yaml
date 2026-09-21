@@ -1,0 +1,94 @@
+# =====================================================================================
+# Shingan — demo overlay
+# =====================================================================================
+# Deep-merged onto `configs/default.yaml`. **This configuration does not represent
+# reality and its output is not a market finding.**
+#
+# What it changes and why
+# -----------------------
+# The default configuration is calibrated to the base rates `docs/03-labeling.md`
+# specifies: single-digit percentages, `fraud_risk` at the low end. That is the honest
+# picture, and on a ten-company panel it means each evaluation block holds single-digit
+# positives — so `fraud_risk` cannot be fitted at all (its training fold is single-class)
+# and the report marks most metrics "insufficient evidence".
+#
+# `synthetic.base_rate_multiplier` exists for exactly this situation. Raising it makes
+# the generator produce more events, which lets the *pipeline* be exercised end to end:
+# every track fits, the fusion ablation runs, the calibration has something to fit and
+# the report has numbers in every section.
+#
+# What survives the multiplier and what does not
+# ----------------------------------------------
+# The base rates change; the *structure* does not. The latent risk state still drives
+# the events, the text channel still carries a component the structured channel cannot
+# see, and the leakage and split machinery is untouched. So a demo run verifies:
+#
+#   * the data pipeline and the labels it produces,
+#   * that the fusion actually combines the two tracks,
+#   * that the report, gates and falsification table render,
+#   * that a leakage assertion fires when it should.
+#
+# It does **not** estimate any real AUC, PR-AUC, IC or calibration error, and it must
+# never be quoted as if it did. Every artifact this config produces is labelled with
+# `is_synthetic: true` and `base_rate_multiplier: 4.0` in its run metadata, and the
+# dataset card carries the same warning.
+#
+# Why 4.0, and why the decision grid is left quarterly
+# ----------------------------------------------------
+# Both knobs raise the positive count, but they are not interchangeable, and an earlier
+# draft of this file got that wrong: it combined a *6x* multiplier with a *monthly*
+# decision grid (rows_per_year 12) and produced 61% positives for `default_risk` and
+# 49% for `fraud_risk`. A 61% positive rate is not a sparse-event problem any more, and
+# a demo whose base rate is 61% demonstrates the opposite of what the metrics are for.
+# (The 6.0 is history — the value below is 4.0 with the grid left quarterly.)
+#
+# The two knobs interact because a `default_risk` event covers a 365-day window: with a
+# quarterly grid it makes about four rows positive, with a monthly grid about twelve.
+# The multiplier therefore never gets a chance to act in isolation, which is why the
+# grid is fixed at quarterly and only the multiplier moves.
+#
+# What the multiplier actually buys, measured on the current generator — 10 names,
+# 2010-01-01..2024-12-31, quarterly rows, fixed seed 13. Rows are *positive rows* in
+# each fold, which is not the same as events (a 730-day fraud window makes ~8 rows
+# positive per event):
+#
+#   multiplier   default_risk rate   fraud_risk rate   fraud train/valid/test   fits?
+#     3.00             0.236            0.094              0 / 13 /  6           no
+#     3.05             0.240            0.094              0 / 13 /  6           no
+#     3.10             0.248            0.132              9 / 18 /  3           yes
+#     3.50             0.322            0.132             16 / 15 / 10           yes
+#     4.00             0.381            0.159             25 / 15 / 11           yes
+#
+# 4.0 is chosen, not inherited. The binding constraint is `fraud_risk`, not
+# `default_risk`:
+#
+#   * Below about 3.1 the `fraud_risk` *training* fold holds no positive row at all, so
+#     the label cannot be fitted and the demo silently falls back to exercising two of
+#     its three tracks. Three fraud events over ten names and fifteen years is a handful
+#     of occurrences whose placement in the folds is close to a coin flip, which is why
+#     the count collapses from 9 to 0 between 3.05 and 3.00 rather than decaying.
+#   * 4.0 is the lowest value whose training fold also clears
+#     `labels.min_positives_for_metrics` (20), so the demo does not print an
+#     "insufficient evidence" warning against the fold the model was fitted on.
+#
+# The cost is the base rate. `default_risk` comes out at 38%, not the ~20% an earlier
+# revision of this comment claimed, and not the single-digit rate a real credit label
+# has. 38% stays under the 50% that would make PR-AUC and the top-5% capture trivially
+# high, and it is the price of a demo in which all three tracks actually fit. Read
+# nothing into the level; the *structure* is what the demo is for.
+
+data:
+  synthetic:
+    base_rate_multiplier: 4.0
+
+labels:
+  # Still 20. Left at the default on purpose: the point of the demo is to show the
+  # report handling a real sample, so the floor that decides "insufficient evidence"
+  # should not be relaxed to make the output look better.
+  min_positives_for_metrics: 20
+
+eval:
+  # The demo has enough positives for the quintile spread to be computed, but ten
+  # companies still cannot form a meaningful cross-section. Leaving this off keeps the
+  # backtest section of the report marked not applicable, per docs/07-roadmap.md.
+  n_quantiles: 5

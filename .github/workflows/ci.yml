@@ -1,0 +1,83 @@
+# CI 说明
+#
+# - CI runner 没有 GPU,所以这里**故意不安装** `train` extra(torch / transformers / peft / trl / datasets /
+#   accelerate / bitsandbytes / sentencepiece / protobuf / safetensors / einops)。测试套件被设计为在没有
+#   torch 的情况下也能跑:LoRA 模块对 torch 做 lazy import,缺依赖时相关测试自动 skip。
+# - 需要 cu128 wheel 的只有本地训练(RTX 5090,Blackwell / sm_120);CI 不涉及也不需要。
+# - test 步骤必须能在 Windows PowerShell 下直接执行,因此全部使用单行、无 POSIX-only 语法的命令。
+# - 本 workflow 不引用任何 secret,也不依赖任何需要凭据的 action。
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint (ruff + mypy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 升级 pip
+        run: python -m pip install --upgrade pip
+
+      - name: 安装 dev extras
+        run: python -m pip install -e ".[dev]"
+
+      - name: ruff check
+        run: ruff check .
+
+      - name: ruff format --check
+        run: ruff format --check .
+
+      - name: mypy
+        run: mypy src
+
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: 升级 pip
+        run: python -m pip install --upgrade pip
+
+      - name: 安装 dev extras
+        run: python -m pip install -e ".[dev]"
+
+      - name: pytest
+        run: pytest -q --cov=shingan --cov-report=term-missing --cov-report=xml
+
+      - name: 上传覆盖率报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: coverage.xml
+          if-no-files-found: warn
+          retention-days: 14

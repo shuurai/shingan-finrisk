@@ -1,0 +1,79 @@
+name: Feature request
+description: 提出新功能、改进或方案层面的建议。
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先描述问题本身,再描述方案。涉及建模或评估的改动,请特别说明是否触碰
+        as-of discipline 与标签定义 —— 这两处一旦改动会影响历史结果的可比性。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题
+      description: 现在缺什么、哪里不好用、哪种场景覆盖不到。
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议的方案
+      description: 你期望的行为或接口;如涉及 CLI,请给出示例命令。
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 考虑过的替代方案
+      description: 写清为什么没选它们;没有替代方案可以填 `无`。
+    validations:
+      required: false
+
+  - type: dropdown
+    id: pipeline_part
+    attributes:
+      label: 影响 pipeline 的哪个环节
+      options:
+        - label: data(采集与清洗)
+          value: data
+        - label: labeling(标签构造)
+          value: labeling
+        - label: features(特征工程)
+          value: features
+        - label: structured track(Track A,梯度提升树)
+          value: structured track
+        - label: text track(Track B,QLoRA / Qwen3)
+          value: text track
+        - label: fusion(融合层)
+          value: fusion
+        - label: evaluation(回测与评估)
+          value: evaluation
+        - label: docs
+          value: docs
+        - label: tooling(CI / 打包 / 开发体验)
+          value: tooling
+    validations:
+      required: true
+
+  - type: dropdown
+    id: discipline_impact
+    attributes:
+      label: 是否影响 as-of discipline 或标签定义
+      description: as-of discipline 指任何特征只使用 t 时点已公开的信息;标签定义指三类风险的判定口径。
+      options:
+        - label: 两者都不影响
+          value: none
+        - label: 影响 as-of discipline
+          value: as_of
+        - label: 影响标签定义
+          value: labels
+        - label: 两者都影响
+          value: both
+        - label: 不确定
+          value: unknown
+    validations:
+      required: true

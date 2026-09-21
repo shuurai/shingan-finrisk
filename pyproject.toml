@@ -1,0 +1,235 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "shingan"
+dynamic = ["version"]
+description = "Evidence-grounded financial risk modelling: a dual-track (QLoRA text + gradient-boosted structured signals) open-source POC for credit, fraud and tail risk."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = { file = "LICENSE" }
+authors = [{ name = "Shane (shuurai)" }]
+keywords = [
+  "financial-risk",
+  "credit-risk",
+  "fraud-detection",
+  "qlora",
+  "lora",
+  "llm",
+  "sec-edgar",
+  "quantitative-finance",
+  "machine-learning",
+  "pytorch",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Financial and Insurance Industry",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Office/Business :: Financial :: Investment",
+]
+
+# Core dependencies are deliberately light and CPU-only so that `shingan demo`
+# and the whole test suite run on a clean checkout with no GPU and no network.
+dependencies = [
+  "numpy>=1.26",
+  "pandas>=2.2",
+  "scikit-learn>=1.4",
+  "scipy>=1.12",
+  "pyyaml>=6.0",
+  "pydantic>=2.7",
+  "typer>=0.12",
+  "rich>=13.7",
+  "jinja2>=3.1",
+  "joblib>=1.4",
+  "httpx>=0.27",
+  "tenacity>=8.3",
+  "tqdm>=4.66",
+  "python-dateutil>=2.9",
+]
+
+[project.optional-dependencies]
+# NOTE for Windows / RTX 5090 (Blackwell, sm_120): install torch from the cu128
+# index BEFORE this extra, otherwise pip resolves the CPU wheel. See docs/06-windows-setup.md.
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+train = [
+  "torch>=2.7",
+  "transformers>=4.53",
+  "peft>=0.14",
+  "trl>=0.19",
+  "datasets>=3.2",
+  "accelerate>=1.4",
+  "bitsandbytes>=0.46",
+  "sentencepiece>=0.2",
+  "protobuf>=5.27",
+  "safetensors>=0.4",
+  "einops>=0.8",
+]
+parquet = ["pyarrow>=17"]
+plots = ["matplotlib>=3.9"]
+explain = ["shap>=0.45"]
+serve = ["fastapi>=0.115", "uvicorn[standard]>=0.30"]
+dev = [
+  "pytest>=8.2",
+  "pytest-cov>=5.0",
+  "pytest-xdist>=3.6",
+  "ruff>=0.6",
+  "mypy>=1.11",
+  "types-PyYAML>=6.0",
+  "pre-commit>=3.7",
+  "nbstripout>=0.7",
+  "ipykernel>=6.29",
+  "matplotlib>=3.9",
+  "build>=1.2",
+  "twine>=5.1",
+]
+
+[project.scripts]
+shingan = "shingan.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/shuurai/shingan"
+Documentation = "https://github.com/shuurai/shingan/tree/main/docs"
+Repository = "https://github.com/shuurai/shingan"
+Issues = "https://github.com/shuurai/shingan/issues"
+Changelog = "https://github.com/shuurai/shingan/blob/main/CHANGELOG.md"
+"Model card" = "https://huggingface.co/shuurai/shingan-qwen3-14b-finrisk"
+"Dataset card" = "https://huggingface.co/datasets/shuurai/shingan-finrisk-labels"
+
+[tool.hatch.version]
+path = "src/shingan/__about__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/shingan"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/tests",
+  "/configs",
+  "/docs",
+  "/scripts",
+  "/templates",
+  "/README.md",
+  "/LICENSE",
+  "/CHANGELOG.md",
+  "/CITATION.cff",
+  "/pyproject.toml",
+]
+
+# ---------------------------------------------------------------------------
+# uv: pin torch to the CUDA 12.8 index so an RTX 5090 (sm_120) never silently
+# gets a CPU-only or pre-Blackwell wheel. `uv sync --extra train` is enough.
+# ---------------------------------------------------------------------------
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+
+[tool.uv]
+default-groups = ["dev"]
+
+# ---------------------------------------------------------------------------
+# ruff
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+exclude = [
+  ".git",
+  ".venv",
+  "artifacts",
+  "data",
+  "docs",
+  "notebooks",
+  "build",
+  "dist",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RET", "PIE", "RUF", "DTZ"]
+# E501 is left to the formatter: long string literals in prompts/lexicons are
+# intentional and reflowing them hurts readability.
+# N803: `X` is the scikit-learn convention and the model classes are scikit-learn
+#       estimators. Renaming it to `features` would make them read like something
+#       else, so the convention wins over the linter here.
+# N818: exceptions are named after what went wrong (`PriceUnavailable`,
+#       `MissingTrainDependencies`) rather than all ending in `Error`. The
+#       leakage family does end in `Error` because a caller catches it as a
+#       category; the others are conditions and are not caught generically.
+ignore = ["E501", "N803", "N818"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["RUF001", "RUF002", "RUF003"]
+"src/shingan/features/text.py" = ["RUF001", "RUF002", "RUF003"]
+"src/shingan/prompts.py" = ["RUF001", "RUF002", "RUF003"]
+# Chinese-language metadata strings; the fullwidth punctuation in them is correct.
+"src/shingan/__about__.py" = ["RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["shingan"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+# ---------------------------------------------------------------------------
+# mypy
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.11"
+mypy_path = "src"
+packages = ["shingan"]
+files = ["src"]
+strict = false
+check_untyped_defs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_unreachable = true
+warn_unused_configs = true
+ignore_missing_imports = true
+show_error_codes = true
+pretty = true
+exclude = ["^tests/", "^build/", "^dist/"]
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
+markers = [
+  "slow: long-running tests (deselect with '-m \"not slow\"')",
+  "network: requires outbound network access (never runs in CI)",
+  "gpu: requires a CUDA device and the 'train' extra",
+]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.coverage.run]
+source = ["shingan"]
+branch = true
+omit = ["src/shingan/__about__.py"]
+
+[tool.coverage.report]
+exclude_lines = [
+  "pragma: no cover",
+  "if TYPE_CHECKING:",
+  "if __name__ == .__main__.:",
+  "raise NotImplementedError",
+]

@@ -1,0 +1,87 @@
+# =====================================================================================
+# Shingan — evaluation overlay
+# =====================================================================================
+# Deep-merged onto `configs/default.yaml`. This file holds the choices that decide what
+# the report is allowed to claim: the gates, the rolling evaluation, the stress periods
+# and the drift baselines.
+#
+# The values here mostly restate the defaults. They are spelled out so that the
+# reasoning is visible in the place a reader would look for it, and so that changing a
+# threshold is an edit to this file rather than a search through the code.
+
+eval:
+  n_bins: 10
+  n_quantiles: 5
+  beta: 2.0
+  top_fraction: 0.05
+  min_test_rows: 50
+
+  # -----------------------------------------------------------------------------------
+  # Gates. A gate is a claim the report is willing to mark pass or fail. Two candidate
+  # thresholds are deliberately absent and the omissions matter more than the entries:
+  #
+  # * **"rolling-window metric variation below 10%"** is not a gate. With single-digit
+  #   positives per fold, the sampling standard deviation of a single-fold AUC can
+  #   exceed 10% on its own, so the threshold is unreachable and failing it says nothing
+  #   about the model. The rolling section reports each fold's interval instead, and the
+  #   questions asked are "is the interval stably above chance" and "is there a
+  #   monotone downward trend".
+  #
+  # * **"long-short Sharpe > 1.0"** is a target (`shingan.eval.SHARPE_TARGET`), not a
+  #   gate. It is unlikely to be reachable on a sparse-event ten-company panel; printing
+  #   it as pass/fail would invite the reader to treat the number as a verdict.
+  # -----------------------------------------------------------------------------------
+  thresholds:
+    auc: 0.75
+    ks: 0.30
+    ece: 0.05
+    ic: 0.05
+    icir: 0.50
+    psi: 0.25
+    csi: 0.25
+    min_pr_auc_lift: 1.0
+
+  rolling:
+    enabled: true
+    # Two years, because the label horizon is 730 days: a shorter window would not let a
+    # single label resolve inside it.
+    window_years: 2
+    # A fold with fewer positives than this is reported as insufficient rather than
+    # scored. Five is already at the edge of what an AUC can survive.
+    min_positives_per_fold: 5
+    # Time-block bootstrap, never an i.i.d. one: overlapping label windows mean rows are
+    # not independent, and an i.i.d. bootstrap would produce intervals that are far too
+    # narrow.
+    bootstrap_samples: 500
+    confidence_level: 0.95
+
+  # Fixed stress periods, each labelled with the regime it stands for. `2020-02-19` is
+  # the pre-crash peak rather than the month's start, so the window contains the crash
+  # instead of the rally before it.
+  stress_periods:
+    - name: global_financial_crisis
+      start: 2008-09-01
+      end: 2009-06-30
+      note: >-
+        Before the default POC window. Reported as "outside the sample" rather than as
+        zero rows, because a stress test that silently contributes nothing reads as a
+        pass.
+    - name: covid_crash
+      start: 2020-02-19
+      end: 2020-04-30
+      note: ""
+    - name: rate_shock
+      start: 2022-01-01
+      end: 2022-12-31
+      note: ""
+
+  report:
+    title: Shingan risk model report
+    include_figures: true
+    max_feature_rows: 25
+    top_evidence_examples: 5
+
+# The split is deliberately not overridden here. Its windows are constrained by the
+# purge margin, and the constraint is documented in `configs/default.yaml`: changing
+# them without re-doing that arithmetic silently starves a block or empties every
+# walk-forward fold.

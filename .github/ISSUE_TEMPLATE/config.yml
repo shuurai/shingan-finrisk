@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 文档索引
+    url: https://github.com/shuurai/shingan/blob/main/docs/index.md
+    about: 先查文档索引:安装、`shingan demo` 与 `shingan doctor` 的用法、双轨架构与评估口径。
+  - name: 使用问题与讨论(Discussions)
+    url: https://github.com/shuurai/shingan/discussions
+    about: 用法咨询、方案探讨、结果解读等非缺陷/非需求类问题,请发到 Discussions,不要开 issue。

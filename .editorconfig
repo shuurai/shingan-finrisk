@@ -1,0 +1,39 @@
+# EditorConfig: https://editorconfig.org
+# Keeps editors consistent across the Windows dev box and CI.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+max_line_length = 100
+
+[*.{yml,yaml,json}]
+indent_size = 2
+
+[*.{toml,cfg,ini}]
+indent_size = 2
+
+[*.md]
+# Markdown uses two trailing spaces for a hard line break, and tables are
+# unreadable if a formatter strips their padding.
+trim_trailing_whitespace = false
+max_line_length = off
+
+[*.ps1]
+end_of_line = crlf
+indent_size = 4
+
+[*.{bat,cmd}]
+end_of_line = crlf
+
+[Makefile]
+indent_style = tab
+
+[*.ipynb]
+# Notebooks are normalised by nbstripout, not by hand.
+indent_size = 1
+trim_trailing_whitespace = false

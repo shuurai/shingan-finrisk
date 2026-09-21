@@ -1,0 +1,39 @@
+# Normalise line endings so the repo behaves identically on Windows, macOS and Linux.
+#
+# Rationale: this project is developed on Windows 11 and CI runs on both
+# windows-latest and ubuntu-latest. Without this file, a Windows checkout with
+# core.autocrlf=true would rewrite every checked-in file and produce whole-file
+# diffs on every commit.
+* text=auto eol=lf
+
+# Windows-native scripts must stay CRLF: cmd.exe is unreliable with LF-only .bat,
+# and PowerShell's handling of LF .ps1 files depends on the host version.
+*.ps1 text eol=crlf
+*.psm1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# POSIX scripts must stay LF or the shebang breaks inside containers and WSL.
+*.sh text eol=lf
+
+# Binary assets: never touch, never diff.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.whl binary
+*.parquet binary
+*.safetensors binary
+*.gguf binary
+*.pt binary
+*.pth binary
+*.bin binary
+
+# Lockfiles and generated data are noise in diffs.
+uv.lock linguist-generated=true
+data/** linguist-generated=true
+artifacts/** linguist-generated=true

@@ -1,0 +1,128 @@
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+sdist/
+wheels/
+*.egg-info/
+*.egg
+.installed.cfg
+
+# --- Environments -----------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+.python-version.bak
+.conda/
+.uv/
+uv.lock.bak
+
+# --- Packaging / tooling caches --------------------------------------------
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+*.log
+
+# --- Jupyter ----------------------------------------------------------------
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+profile_default/
+ipython_config.py
+
+# --- Data (payloads are never committed; directories are kept by .gitkeep) ---
+data/raw/*
+data/interim/*
+data/processed/*
+data/external/*
+!data/**/.gitkeep
+
+# --- Model artifacts --------------------------------------------------------
+artifacts/
+models/
+checkpoints/
+outputs/
+wandb/
+mlruns/
+runs/
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.gguf
+*.onnx
+*.joblib
+*.pkl
+adapter_model.*
+optimizer.pt
+scheduler.pt
+training_args.bin
+rng_state.pth
+
+# --- Hugging Face caches ----------------------------------------------------
+.cache/
+.hf_cache/
+huggingface/
+transformers_cache/
+datasets_cache/
+
+# --- Generated reports and figures -----------------------------------------
+reports/generated/
+figures/
+*.report.md
+report_*.md
+
+# --- Editor / OS ------------------------------------------------------------
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.json.example
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Secrets ----------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.yaml
+secrets.yml
+*.token
+
+# --- Internal design notes (never published) --------------------------------
+# The original `lora-1.md` .. `lora-5.md` discussion notes are the working record of the
+# design conversation that preceded this project. They are not specification, and the
+# specification does not depend on them: every document under `docs/` is self-contained
+# and cites nothing from here. Ignored so that a checkout of this repository exposes the
+# official setup and files only.
+docs/discussion/
+
+# Tool-local working directory (design log, caches). Not part of the published project:
+# the memory log records the debugging history, which is process rather than specification.
+# Remove this line if the memory or automation files in here should be versioned after all.
+.workbuddy/
+
+# --- Scratch ----------------------------------------------------------------
+scratch/
+tmp/
+temp/
+*.tmp

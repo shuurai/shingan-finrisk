@@ -1,0 +1,326 @@
+# =====================================================================================
+# Shingan — base configuration
+# =====================================================================================
+# This file is the base of a layered stack. `configs/data/*.yaml` and
+# `configs/eval/*.yaml` are deep-merged onto it, later files winning. See
+# `docs/adr/` for why the configuration is a stack rather than one file.
+#
+# Two properties are enforced by `shingan.config` and worth knowing before editing:
+#
+# 1. **An unknown key is a hard error.** A typo fails at load time, loudly, instead
+#    of silently training with the default. So every key you can write is listed
+#    here; if it is not in this file, it does not exist.
+# 2. **`labels.*_horizon_days` is the single source of truth for the split margin.**
+#    `split.purge_days` may not be smaller than the longest horizon in use, and the
+#    loader raises it if it is. Changing a horizon therefore changes how much data
+#    survives purging — see the arithmetic in the `split` section below.
+#
+# Generated from the pydantic schema, so the key set and the code cannot drift.
+# A test asserts that this file still documents every field.
+# =====================================================================================
+
+project:
+  name: shingan
+  description: Evidence-grounded financial risk modelling
+  # One seed for the whole pipeline. The synthetic generator, the train/valid split
+  # inside walk-forward, and the bootstrap all draw from it, so a run is reproducible
+  # from this number alone.
+  seed: 13
+  data_version: 0.1.0
+  # Set to run a pipeline against a scratch directory instead of auto-detecting the
+  # repository root. `null` means auto-detect.
+  root: null
+
+data:
+  # The company universe. For `sources: [synthetic]` this is used only as a *count*:
+  # the synthetic generator substitutes its own fictional identifiers (SXAA..SXAL) and
+  # never pretends to model these companies. The tickers matter once a real fetcher is
+  # in play.
+  universe: [JPM, GS, GE, CAT, BA, XOM, T, F, M, WBA]
+  start: 2010-01-01
+  end: 2024-12-31
+
+  # `synthetic` is the only source that runs without the network. The others
+  # (`edgar`, `fnspid`, `prices_yfinance`, `prices_stooq`) are written but unvalidated
+  # — see docs/02-data.md — and raise if selected without a network.
+  sources: [synthetic]
+  offline: true
+  cache_dir: null
+
+  # SEC EDGAR requires a descriptive User-Agent with contact details. The default is a
+  # placeholder: set SHINGAN_SEC_USER_AGENT in the environment before using `edgar`.
+  sec_user_agent: "shingan-research/0.1 (contact: set SHINGAN_SEC_USER_AGENT)"
+  sec_requests_per_second: 5.0
+  sec_max_retries: 4
+  sec_timeout_seconds: 30.0
+
+  # Data-quality gates. `max_nan_run` is the longest tolerated gap in a price series
+  # (a longer run marks the company's rows as insufficient history); `min_history_days`
+  # is the shortest usable price history.
+  max_nan_run: 10
+  min_history_days: 252
+
+  news_dedup_similarity: 0.9
+  news_dedup_prefix_chars: 256
+  max_filings_per_company: 8
+
+  synthetic:
+    # Bounds the row count: the generator makes `min(n_companies, len(universe))`.
+    n_companies: 12
+    start: 2010-01-01
+    end: 2024-12-31
+    # Decision points per company per year. 4 mimics a quarterly filing calendar.
+    # The whole evaluation is sized by this knob: at 4, a ten-company fifteen-year
+    # panel holds ~550 rows, and each label's effective split block holds single-digit
+    # positives. Raise it to 12 for a monthly grid when a run needs more positives.
+    rows_per_year: 4
+
+    # The one design decision that makes the fusion comparison meaningful: this share
+    # of the latent risk factor is visible ONLY in the text. At 0 the structured track
+    # could recover everything and the text track would be noise by construction.
+    #
+    # "Meaningful" is bounded: the claim that text adds signal is *assumed into* the
+    # generator, so a positive fusion gain on synthetic data is evidence about the
+    # wiring and exactly zero evidence about markets.
+    text_component_strength: 0.6
+    # Share of the latent factor discarded when projecting it onto the structured
+    # features, before noise is added. Puts a ceiling on structured-only performance.
+    structure_information_loss: 0.55
+    label_noise: 0.12
+
+    # Scales every per-label event rate. **This is the knob for a runnable demo.**
+    #
+    # At 1.0 the generator is calibrated to the base rates docs/03-labeling.md
+    # specifies: single-digit percentages, fraud_risk at the low end. On a
+    # ten-company panel those rates put single-digit positives in each evaluation
+    # block, which is the honest picture and also means most metrics are reported as
+    # "insufficient evidence". Raise it (configs/data/demo.yaml uses 6.0) to produce
+    # enough positives to exercise the pipeline end to end, and label the result a
+    # synthetic demonstration rather than a market finding.
+    base_rate_multiplier: 1.0
+
+    # Injects the rows a real panel always contains and most pipelines break on: a
+    # halted price series, a delisted company, a recent listing, and a restatement.
+    # The last three also carry the coverage and insufficient-history tests.
+    inject_edge_cases: true
+    missing_rate: 0.04
+
+labels:
+  # Only these three are in scope. `liquidity_risk`, `event_driven_risk` and
+  # `macro_contagion_risk` are catalogued in docs/03-labeling.md and deliberately not
+  # implemented, so that no metric is reported for a label nobody can defend.
+  targets: [default_risk, fraud_risk, tail_risk]
+
+  # The horizon is part of the definition, not a tuning parameter. Changing one
+  # creates a different label and invalidates earlier results, so each label carries
+  # its own value and every row records the horizon it was built with.
+  default_risk_horizon_days: 365
+  default_risk_downgrade_notches: 2
+  default_risk_use_bankruptcy: true
+
+  fraud_risk_horizon_days: 730
+
+  # tail_risk is the *running peak-to-trough* drawdown, not the drop from the window
+  # start: a stock that rallies 40% then falls 35% from its peak has had a 35%
+  # drawdown even though its start-to-end return is positive.
+  tail_risk_horizon_trading_days: 30
+  tail_risk_drawdown_threshold: -0.30
+
+  # Reporting floors, not modelling choices. Below `min_positives_for_metrics` the
+  # report says "insufficient evidence" instead of printing an AUC: an AUC computed on
+  # four positives still looks like an AUC.
+  positive_rate_warning_threshold: 0.02
+  min_positives_for_metrics: 20
+
+  # Negatives kept per positive, or null to keep every negative and rely on
+  # `sample_weight` instead of discarding data. Evaluation is never downsampled:
+  # doing so invalidates ECE, Brier and PR-AUC while leaving AUC roughly intact, which
+  # is a particularly confusing failure.
+  negative_downsample_ratio: null
+
+split:
+  # ---------------------------------------------------------------------------------
+  # READ THIS BEFORE CHANGING THE WINDOWS.
+  #
+  # Purging moves only the *end* of a block: `train` is pulled back to
+  # `valid.start - margin` and `valid` to `test.start - margin`. The starts are
+  # untouched. A block's effective length is therefore decided by where the *next*
+  # block starts, not by this block's nominal end.
+  #
+  # margin = purge_days + embargo = 730 + 42 = 772 days, and it is 730 because that is
+  # fraud_risk's horizon. So the three blocks are separated by 2.1 years each, and the
+  # test block additionally loses 2 years to terminal truncation (`data_end - 730`) so
+  # its label windows can close. Out of a 15-year panel that leaves under 9 usable
+  # years, divided here roughly 4.9 / 1.9 / 1.9.
+  #
+  # A plausible-looking set of windows has already produced both of these, silently:
+  #   * valid reduced to 324 days, against the ~22 months docs/05-evaluation.md assumes,
+  #     because test.start sat 3 years after valid.start while the margin is 2.1 years;
+  #   * **every** walk-forward fold discarded, because a block of `test_block_years` is
+  #     both the validation and the test block, and a 2-year block (730 days) is shorter
+  #     than the 772-day margin, so purging always inverted the validation block.
+  #
+  # `min_effective_window_days` now makes a starved block an error rather than a thin
+  # evaluation nobody notices.
+  # ---------------------------------------------------------------------------------
+  train: { start: 2010-01-01, end: 2016-12-31 }
+  valid: { start: 2017-01-01, end: 2019-12-31 }
+  test: { start: 2021-01-01, end: 2024-12-31 }
+
+  # Samples whose label window overlaps a later block are dropped. Must be at least the
+  # longest horizon in use; the loader raises it if not.
+  purge_days: 730
+
+  # Extra isolation in TRADING days on top of purging, to weaken serial correlation
+  # across a block boundary.
+  embargo_days: 30
+
+  # Walk-forward block length. Must exceed margin_days / 365.25 with room to spare, or
+  # purging inverts every fold's validation block.
+  test_block_years: 3
+  step_years: 1
+
+  min_effective_window_days: 365
+
+  # One split per label, each with its own purge margin. Recovers a lot of data —
+  # tail_risk's horizon is 42 days, not 730 — at the cost of comparing labels over
+  # different periods. Off by default so the three labels share one sample.
+  per_label: false
+
+structured:
+  # Track A: gradient boosting over the structured signals.
+  kind: hist_gbdt
+
+  # Fitted on the validation fold only, never on train: train scores are optimistically
+  # biased, so calibrating on them produces over-confident probabilities. Isotonic is
+  # downgraded to Platt automatically when the calibration fold has few positives.
+  calibration: isotonic
+  feature_groups: [ratios, technical, text_counts]
+  params: {}
+  use_sample_weight: true
+  permutation_importance_repeats: 5
+  permutation_importance_sample: 2000
+
+text_baseline:
+  # Track B0: a bag-of-words baseline on the same text the LoRA sees. Its only job is
+  # to answer "does the fine-tuned LLM beat TF-IDF", which is the question the LoRA
+  # has to answer before it is worth its cost.
+  kind: tfidf_logreg
+  max_features: 50000
+  ngram_min: 1
+  ngram_max: 2
+  min_df: 2
+  C: 1.0
+  calibration: platt
+  max_chars: 40000
+
+lora:
+  # Track B: QLoRA instruction tuning. Requires the `train` extra.
+  base_model: Qwen/Qwen3-14B
+  load_in_4bit: true
+  bnb_4bit_quant_type: nf4
+  bnb_4bit_use_double_quant: true
+  bnb_4bit_compute_dtype: bfloat16
+  lora_r: 32
+  lora_alpha: 64
+  lora_dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj]
+  bias: none
+  max_seq_length: 4096
+  learning_rate: 0.0001
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.03
+  num_train_epochs: 3
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 16
+  gradient_checkpointing: true
+  optim: paged_adamw_8bit
+  # bf16 on, fp16 off: Blackwell has bf16 and mixing the two is a silent numerical bug.
+  bf16: true
+  fp16: false
+  # sdpa, never flash-attn: flash-attn has no working Windows build, and this project
+  # must run on a Windows 5090. See docs/06-windows-setup.md.
+  attn_implementation: sdpa
+  # Packing is forbidden, not merely off: it concatenates samples across a prompt
+  # boundary and destroys per-example supervision. `train_lora` asserts this is false.
+  packing: false
+  # 0 on Windows: the DataLoader worker start method is not fork, and every worker
+  # re-imports torch.
+  dataloader_num_workers: 0
+  eval_strategy: epoch
+  save_total_limit: 3
+  logging_steps: 10
+  report_to: none
+  max_grad_norm: 1.0
+  packing_max_chars: null
+  device_map: single
+  output_dir: artifacts/lora
+
+fusion:
+  # Track C: an explicit stacker over the two tracks' scores plus their cross-sectional
+  # ranks. Deliberately small — with this many positives, a large fusion model would
+  # fit noise, and `fusion_ablation` exists to show whether it earned its keep.
+  kind: logistic_stack
+  weights: [0.5, 0.5]
+  use_rank_inputs: true
+  seed: 13
+
+eval:
+  n_bins: 10
+  n_quantiles: 5
+  # F-beta with beta=2: recall weighted twice as heavily as precision, because missing
+  # a deteriorating company costs more than a wasted review.
+  beta: 2.0
+  # The "review the top 5%" workflow the capture metric is framed around.
+  top_fraction: 0.05
+  min_test_rows: 50
+
+  # Gates. `auc` and `ks` are the classic risk-screen thresholds; `ece` is the
+  # calibration requirement; `psi`/`csi` are drift alarms.
+  #
+  # Two candidate thresholds are deliberately NOT here. "Rolling-window metric
+  # variation below 10%" is unreachable when folds hold single-digit positives — the
+  # sampling standard deviation of a single-fold AUC exceeds 10% — so it is reported
+  # as an observation with a bootstrap interval instead of a yes/no. And a
+  # long-short Sharpe above 1.0 is a *target* (`eval.SHARPE_TARGET`), not a gate:
+  # small-sample, low-base-rate equity curves do not reliably reach it.
+  thresholds:
+    auc: 0.75
+    ks: 0.30
+    ece: 0.05
+    ic: 0.05
+    icir: 0.50
+    psi: 0.25
+    csi: 0.25
+    min_pr_auc_lift: 1.0
+
+  rolling:
+    enabled: true
+    window_years: 2
+    min_positives_per_fold: 5
+    bootstrap_samples: 500
+    confidence_level: 0.95
+
+  # Fixed periods, each labelled with the regime it represents. Overlap with the sample
+  # is reported; a period entirely outside it is skipped with an explicit note rather
+  # than silently contributing zero rows.
+  stress_periods:
+    - name: global_financial_crisis
+      start: 2008-09-01
+      end: 2009-06-30
+      note: Outside the default POC window; skipped with an explicit note when unused.
+    - name: covid_crash
+      start: 2020-02-19
+      end: 2020-04-30
+      note: ""
+    - name: rate_shock
+      start: 2022-01-01
+      end: 2022-12-31
+      note: ""
+
+  report:
+    title: Shingan risk model report
+    include_figures: true
+    max_feature_rows: 25
+    top_evidence_examples: 5
