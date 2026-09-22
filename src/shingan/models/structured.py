@@ -278,7 +278,7 @@ class StructuredRiskModel:
         # blocks the whole run at the last step rather than degrading one field.
         report: dict[str, Any] = {
             "configured": str(self.config.calibration),
-            "n_calibration_rows": int(len(y_valid)),
+            "n_calibration_rows": len(y_valid),
             "n_calibration_positives": positives,
         }
         if self.config.calibration == "none":
@@ -360,7 +360,6 @@ class StructuredRiskModel:
 
         Returns the directory, so ``StructuredRiskModel.load(model.save(d))`` round-trips.
         """
-        import joblib
 
         destination = write_model(
             directory,

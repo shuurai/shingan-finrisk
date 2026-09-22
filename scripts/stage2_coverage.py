@@ -36,7 +36,12 @@ if str(ROOT / "src") not in sys.path:
 
 from shingan.config import ProjectConfig, load_config  # noqa: E402
 from shingan.data.prices import price_quality_report  # noqa: E402
-from shingan.data.schema import RiskLabel, label_column, mask_column, source_of_record_column  # noqa: E402
+from shingan.data.schema import (  # noqa: E402
+    RiskLabel,
+    label_column,
+    mask_column,
+    source_of_record_column,
+)
 from shingan.pipeline import select_feature_columns  # noqa: E402
 
 DEFAULT_OVERLAY = ROOT / "configs" / "data" / "stage2_real.yaml"
@@ -127,7 +132,7 @@ def price_section(prices: pd.DataFrame) -> tuple[list[str], dict[str, Any]]:
         )
     detail = {
         "present": True,
-        "n_tickers": int(len(quality)),
+        "n_tickers": len(quality),
         "total_rows": int(quality["rows"].sum()),
         "mean_close_missing_frac": float(quality["close_missing_frac"].mean()),
         "max_close_missing_frac": float(quality["close_missing_frac"].max()),
@@ -141,7 +146,7 @@ def panel_section(
 ) -> tuple[list[str], dict[str, Any]]:
     """Label observability, positives with their source of record, and feature coverage."""
     lines: list[str] = []
-    detail: dict[str, Any] = {"n_rows": int(len(panel)), "n_tickers": int(panel["ticker"].nunique())}
+    detail: dict[str, Any] = {"n_rows": len(panel), "n_tickers": int(panel["ticker"].nunique())}
 
     lines.append("| label | rows | observable | masked out | masked frac | positives | rate |")
     lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
@@ -152,7 +157,7 @@ def panel_section(
         positives = int(values[mask].fillna(0).sum())
         observable = int(mask.sum())
         labels_detail[label] = {
-            "rows": int(len(panel)),
+            "rows": len(panel),
             "observable": observable,
             "masked_out": int((~mask).sum()),
             "masked_frac": float((~mask).mean()),

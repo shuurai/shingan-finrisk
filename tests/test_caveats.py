@@ -16,7 +16,6 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from shingan.data.schema import (
     FEATURE_SOURCES,
@@ -25,7 +24,13 @@ from shingan.data.schema import (
     SOURCE_ADVICE,
     diagnose_gaps,
 )
-from shingan.pipeline import PATH_FUSED, PATH_STRUCTURED, PATH_TEXT, _data_gap_notes, _window_gap_notes
+from shingan.pipeline import (
+    PATH_FUSED,
+    PATH_STRUCTURED,
+    PATH_TEXT,
+    _data_gap_notes,
+    _window_gap_notes,
+)
 
 #: The feature columns the panel can carry: everything that is not an id, a split value,
 #: a label, a forward-looking column or a weight.

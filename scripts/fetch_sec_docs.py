@@ -340,7 +340,7 @@ def download(
             try:
                 record = future.result()
                 progress.record(ok=True, n_bytes=int(record["n_html_bytes"]))
-            except Exception as exc:  # noqa: BLE001 - one bad filing must not end the run
+            except Exception as exc:
                 progress.record(ok=False)
                 failures[task.accession] = f"{task.ticker} {task.doc_type} {task.filed}: {exc}"
             if time.monotonic() - last_print > 20 or progress.done == total:
@@ -380,7 +380,7 @@ def rebuild_filings(
             continue
         try:
             record = read_cache(path)
-        except Exception:  # noqa: BLE001 - a corrupt cache entry is a refetch, not a crash
+        except Exception:
             unreadable += 1
             continue
         cached += 1
@@ -473,7 +473,7 @@ def verify_user_agent(user_agent: str) -> None:
     try:
         fetch_bytes(probe, RateLimiter(5.0), user_agent=user_agent)
         return
-    except Exception as exc:  # noqa: BLE001 - the message below is the point
+    except Exception as exc:
         raise SystemExit(
             f"the SEC archive rejects this User-Agent:\n  {user_agent!r}\n  {exc}\n"
             "A descriptive UA is required, but the contact *domain* is what is filtered: "

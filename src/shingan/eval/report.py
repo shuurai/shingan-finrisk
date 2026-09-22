@@ -367,13 +367,33 @@ def gate_table(
             )
 
     if stability is not None:
-        for name, passed in stability.passes().items():
+        # Three different counts live in a stability result and only one of them is what
+        # `enough_usable_windows` is about:
+        #   n_windows  every configured window
+        #   n_usable   windows for which a fold was fitted, regardless of whether any row
+        #              inside it carried both a label and a score
+        #   scored     windows holding at least one scorable row -- this is what `passes()`
+        #              counts, and therefore the only honest denominator for that gate
+        # Reporting `n_usable` against a check that fires on `scored` printed the
+        # self-contradicting row "14/14 usable windows | FAIL" in a report whose own
+        # section 6 said "Windows carrying both a label and a score: 2 of 14".
+        coverage = stability.coverage
+        n_windows = coverage.get("n_windows", 0)
+        usable = coverage.get("n_usable", 0)
+        scored = coverage.get("n_scored", usable)
+        checks = stability.passes()
+        for name, passed in checks.items():
+            if name == "enough_usable_windows":
+                achieved = f"{scored}/{n_windows} windows scored"
+            elif name == "has_multiple_windows":
+                achieved = f"{n_windows} configured windows"
+            else:
+                achieved = f"{usable}/{n_windows} usable windows"
             rows.append(
                 GateRow(
                     name=f"stability_{name}",
                     target="windows' AUC intervals above random, no systematic decline",
-                    achieved=f"{stability.coverage.get('n_usable', 0)}/"
-                    f"{stability.coverage.get('n_windows', 0)} usable windows",
+                    achieved=achieved,
                     passed=passed,
                     note="the '<10% swing' gate from the notes is unreachable and is not used",
                 )

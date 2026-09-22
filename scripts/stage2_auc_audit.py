@@ -168,7 +168,7 @@ def main() -> None:
     panel = pd.read_csv(PANEL)
     panel["as_of"] = pd.to_datetime(panel["as_of"])
     model = StructuredRiskModel.load(MODEL_DIR)
-    features = list(model._feature_names)  # noqa: SLF001 - the audit is about this exact feature set
+    features = list(model._feature_names)
 
     observable = panel[MASK].astype(bool)
     test = panel.loc[observable & (panel["split"] == "test")].copy()
@@ -181,7 +181,7 @@ def main() -> None:
             "reported_auc": REPORTED,
             "recomputed_auc": float(auc),
             "matches": bool(abs(auc - REPORTED) < 1e-9),
-            "n_rows": int(len(test)),
+            "n_rows": len(test),
             "n_positives": int(y.sum()),
             "n_negatives": int(len(y) - y.sum()),
             "n_features_used": len(features),
@@ -193,13 +193,13 @@ def main() -> None:
     for name in ("train", "valid", "test", "purged", "excluded"):
         subset = panel.loc[observable & (panel["split"] == name)]
         per_split[name] = {
-            "rows": int(len(subset)),
+            "rows": len(subset),
             "positives": int(subset[LABEL].sum()),
             "base_rate": float(subset[LABEL].mean()) if len(subset) else float("nan"),
         }
     all_positives = panel.loc[observable & (panel[LABEL] == 1)]
     result["positives_by_split"] = per_split
-    result["positives_total_observable"] = int(len(all_positives))
+    result["positives_total_observable"] = len(all_positives)
     result["positive_dates"] = {
         "earliest": str(all_positives["as_of"].min().date()),
         "latest": str(all_positives["as_of"].max().date()),
@@ -219,7 +219,7 @@ def main() -> None:
         "score_ranks": [
             int((scores > scores[test.index.get_loc(index)]).sum() + 1) for index in test_positives.index
         ],
-        "n_rows": int(len(test)),
+        "n_rows": len(test),
     }
 
     # -- 3. precision ----------------------------------------------------------
@@ -254,7 +254,7 @@ def main() -> None:
     # -- 3b. the excluded block -------------------------------------------------
     excluded = panel.loc[observable & (panel["split"] == "excluded")]
     result["excluded_block"] = {
-        "rows": int(len(excluded)),
+        "rows": len(excluded),
         "positives": int(excluded[LABEL].sum()),
         "share_of_all_positives": float(excluded[LABEL].sum() / max(len(all_positives), 1)),
         "by_year": {
@@ -305,7 +305,7 @@ def main() -> None:
     univariate = univariate_table(test, features, y)
     result["univariate_top"] = univariate.head(15).to_dict("records")
     result["univariate_counts"] = {
-        "n_features": int(len(univariate)),
+        "n_features": len(univariate),
         "n_all_missing_in_test": int((univariate["n_observed"] == 0).sum()),
         "n_abs_edge_over_0_2": int((univariate["abs_edge"] > 0.2).sum()),
         "n_missing_indicator_over_0_7": int(

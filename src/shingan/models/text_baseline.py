@@ -84,7 +84,7 @@ class TextBaselineModel:
                 "calibrator": "none",
                 "reason": "empty training corpus",
                 "n_documents": 0,
-                "n_calibration_rows": int(len(y_valid)),
+                "n_calibration_rows": len(y_valid),
                 "n_calibration_positives": int(y_valid.sum()),
             }
             return self
@@ -104,7 +104,7 @@ class TextBaselineModel:
             self.calibration_report = {
                 "calibrator": "none",
                 "reason": f"vectoriser failed: {exc}",
-                "n_calibration_rows": int(len(y_valid)),
+                "n_calibration_rows": len(y_valid),
                 "n_calibration_positives": int(y_valid.sum()),
             }
             return self
@@ -124,8 +124,8 @@ class TextBaselineModel:
 
         raw_valid = self._classifier.predict_proba(matrix_valid)[:, 1]
         self._calibrator, kind, report = self._fit_calibrator(raw_valid, y_valid)
-        report["vocabulary_size"] = int(len(self._vectorizer.vocabulary_))
-        report["n_documents"] = int(len(train_documents))
+        report["vocabulary_size"] = len(self._vectorizer.vocabulary_)
+        report["n_documents"] = len(train_documents)
         self.calibration_report = report
         if self.config.calibration == "none":
             self.calibration_report.setdefault("calibrator", "none")
@@ -137,7 +137,7 @@ class TextBaselineModel:
         """Platt scaling on the validation fold, or nothing when that is impossible."""
         report: dict[str, Any] = {
             "configured": str(self.config.calibration),
-            "n_calibration_rows": int(len(y_valid)),
+            "n_calibration_rows": len(y_valid),
             "n_calibration_positives": int(np.asarray(y_valid).sum()),
         }
         if self.config.calibration == "none":

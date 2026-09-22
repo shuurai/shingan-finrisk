@@ -469,6 +469,15 @@ def rolling_stability(
         for name in ("auc", "ks", "pr_auc", "ece")
         if name in table.columns and table[name].notna().any()
     }
+
+    # `coverage` counts windows that were *misconfigured* into insufficiency, which is a
+    # different question from whether a window held a single scorable row. A window can be
+    # sufficient and still contribute nothing -- e.g. it lies outside the block the model
+    # was scored on -- and `passes()` counts those as unusable. Without this key the report
+    # had no number matching its own gate and printed `n_usable` against it, producing the
+    # impossible row "4/15 usable windows | FAIL".
+    coverage["n_scored"] = int((table["reason"] == "ok").sum()) if not table.empty else 0
+
     return RollingStabilityResult(table=table, coverage=coverage, trends=trends, windows=windows)
 
 

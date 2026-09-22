@@ -114,6 +114,156 @@ tests/              pytest 测试套件
 | `shingan publish hf` | 推送到 Hugging Face Hub |
 | `shingan version` | 打印版本 |
 
+## 测试与覆盖率
+
+[![ci](https://github.com/shuurai/shingan-finrisk/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/shuurai/shingan-finrisk/actions/workflows/ci.yml)
+![tests](https://img.shields.io/badge/tests-160%20passed-brightgreen)
+![coverage](https://img.shields.io/badge/coverage-34%25-yellow)
+![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)
+![license](https://img.shields.io/badge/license-Apache--2.0-blue)
+
+**CI 跑的是 Linux(`ubuntu-latest`)、Python 3.11、单个 job。** 无 matrix、无 secret、无外部网络——除 `pyproject.toml` 声明的 `requires-python` 与 `data/` 目录名之外,本仓库没有大小写敏感或路径分隔符相关的平台假设。
+
+```bash
+python -m pytest -m "not network and not gpu and not slow" -q --cov=shingan
+```
+
+### 测试套件
+
+| 指标 | 值 |
+| --- | --- |
+| 测试数 | **160 全部通过** |
+| 套件耗时 | **2.0 s**(纯测试)/ **2.7 s**(含解释器启动) |
+| 测试文件 | 9 |
+| 被跳过的分支 | `network` / `gpu` / `slow` 三个 marker,当前无测试落在其中 |
+
+| 文件 | 测试数 | 覆盖的对象 |
+| --- | --- | --- |
+| [`tests/test_metrics.py`](tests/test_metrics.py) | 43 | AUC / KS / PR-AUC / ECE / capture,含并列分数的行为与 sklearn 交叉验证 |
+| [`tests/test_caveats.py`](tests/test_caveats.py) | 22 | 缺特征诊断、按来源分组、可执行建议、窗口未覆盖年份的披露 |
+| [`tests/test_models.py`](tests/test_models.py) | 22 | 三路模型的持久化契约与往返、消融表的完整性 |
+| [`tests/test_sec_docs.py`](tests/test_sec_docs.py) | 22 | EDGAR 归档地址拼装、UA 校验、部分写入防护、断点续传 |
+| [`tests/test_text_features.py`](tests/test_text_features.py) | 15 | 章节分段、标题识别、空文档与"无负面词"的区别 |
+| [`tests/test_report_gates.py`](tests/test_report_gates.py) | 11 | 门禁行的目标/达成/判定三者自洽 |
+| [`tests/test_labeling.py`](tests/test_labeling.py) | 9 | 三个标签的事件定义与右边界截断 |
+| [`tests/test_splits.py`](tests/test_splits.py) | 9 | purge / embargo、滚动窗口的可用性判定 |
+| [`tests/test_builder_text.py`](tests/test_builder_text.py) | 7 | 面板拼接与文本列的接线 |
+
+### 覆盖率:34%,并且不是一个门槛
+
+| 范围 | 语句覆盖 |
+| --- | --- |
+| **总体** | **34%**(5850 条语句,3591 条未执行) |
+| `models/persistence.py` | 100% |
+| `features/text.py` | 86% |
+| `models/fusion.py` / `models/text_baseline.py` | 79% |
+| `models/structured.py` | 73% |
+| `eval/metrics.py` | 49% |
+| `cli.py` / `data/prices.py` / `data/news.py` | 0% |
+
+**这个数字低,而且低得有明确原因。** 覆盖率不是本项目的验收标准——README 里唯一有资格充当门槛的是[评测](docs/05-evaluation.md)第 9 节那七个门禁。补测试的唯一理由是防回归,不是把百分比推高:
+
+- **被覆盖的恰好是"错了看不出来"的那些。** `features/text.py`(86%)与三个模型类(73–79%)之上的测试,针对的是四个真实缺陷:章节标题识别在 1722/2222 份文档上失效而三列特征全零、`average_precision` 对并列分数按行序取整(无信号模型可得 1.0)、`expected_calibration_error` 用 rank 分箱(完美校准反而得 0.5)、模型 `save()` 与 `load()` 的路径契约互相矛盾。这些东西**不会**在 demo 里报错,只会安静地把数字变好看。
+- **未覆盖的大多是"要么跑起来、要么连不上"的接线。** `cli.py`、`data/prices.py`、`data/news.py` 是三个 live 端点适配器与命令面。它们的失败模式是 403、超时、schema 变了——靠 mock 断言不了,靠真跑才有意义,而在 CI 里真跑会既贵又不稳。这部分刻意留在 `network` marker 之下。
+- **`data/synthetic.py`(15%)是测试夹具,不是被测对象。** 它的正确性由"跑出来的面板恰好有三个标签且事件率落在预期区间"来证明。
+
+等你看到这里,如果想问"为什么不加门槛":加一份门槛,接下来会出现的是一批为了让数字变绿而写的测试,那比没有测试更糟。
+
+### 门禁:7 项中 1 项通过
+
+这是合成数据 demo(`shingan demo`)的实测结果,原始记录在 [`artifacts/_readme_demo/`](artifacts/_readme_demo/)。**这不是性能结论**,理由见[诚实性声明](#诚实性声明):合成数据的信号是生成器植入的,指标只反映实现与设计一致。列在这里是为了证明门禁会**如实报红**。
+
+| 门禁 | 目标 | 实测 | 判定 |
+| --- | --- | --- | --- |
+| `headline_auc` | > 0.75 | 0.4759 | 未通过 |
+| `headline_ks` | > 0.30 | 0.1192 | 未通过 |
+| `fusion_gain_pr_auc` | fused PR-AUC > structured-only,且区间不含零 | −0.0952 [−0.0952, −0.0767] | 未通过 |
+| `calibration_ece` | < 0.05 | 0.1416 | 未通过 |
+| `brier_beats_base_rate` | Brier skill > 0 | −0.0195 | 未通过 |
+| `stability_has_multiple_windows` | 窗口数足够 | 14 个配置窗口 | **通过** |
+| `stability_enough_usable_windows` | ≥ 3 个窗口同时带标签与分数 | 2/14 | 未通过 |
+
+七项里只有一项背景性检查通过。**"PR-AUC 区间不含零但方向为负"是本项目要回答的核心问题目前的答案:文本轨没有提供增量,融合反而更差。** 这个结论写在门禁里,而不是留在某个被挑出来的数字里。
+
+### 三路消融:文本轨当前没有增量
+
+`shingan demo` 的三路对比,同一测试块、同一标签定义,唯一变量是用了哪条轨。基础率与正样本数一并列出,因为一个 64 行、9 个正例的测试块上的 AUC 不该被单独引用。
+
+| 标签 | 路径 | AUC | KS | PR-AUC | ECE | 基础率 / 正例 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `default_risk` | structured | 0.5931 | 0.1931 | 0.5317 | 0.0496 | 0.4531 / 29 |
+| | text-only | 0.3773 | 0.2335 | 0.3755 | 0.1191 | |
+| | fused | 0.4759 | 0.1192 | 0.4365 | 0.1416 | |
+| `fraud_risk` | structured | 0.6904 | 0.3568 | 0.2968 | 0.0534 | 0.1719 / 11 |
+| | text-only | **0.7684** | **0.5043** | **0.6091** | 0.1026 | |
+| | fused | 0.7084 | 0.3756 | 0.4152 | 0.1062 | |
+| `tail_risk` | structured | 0.5434 | 0.2323 | 0.1670 | 0.1335 | 0.1406 / 9 |
+| | text-only | 0.4404 | 0.3374 | 0.2400 | 0.1403 | |
+| | fused | 0.4505 | 0.3152 | 0.1530 | 0.1285 | |
+
+值得记录的观察:`fraud_risk` 上文本轨单独跑出全场最好的 AUC(0.7684),而在另外两个标签上它低于随机。**这个方向的不一致本身就是结果**——在 9–29 个正样本上,三条轨之间的差距没有一个具备统计意义,而融合层在三个标签上全部没有超过 structured-only。诚实的表述是"当前样本量下无法区分",不是"文本有用"或"文本没用"。
+
+### 复现
+
+```bash
+python -m shingan demo --out artifacts/_readme_demo    # 合成数据,CPU,无需网络
+python -m pytest -m "not network and not gpu and not slow" -q --cov=shingan
+```
+
+上面的表格全部来自这两条命令的输出,没有手工转录。`--run-dir` 下同时留下 `.json`(机器可读的记录)与 `.md`(渲染稿),`shingan eval report` 会重跑一遍并逐项比对两者——报告与它自己的载荷不一致时报错,而不是等读者发现。
+
+## 发布到 Hugging Face
+
+发布路径已经写好,但**默认拒绝上传不完整的卡片**。这不是仪式:模型卡的每一个 `{{...}}` 槽位最终都会变成页面上的一句话,而没人核对过的数字一旦发布,就再也收不回来。所以 `--dry-run` 是常规工作流,真实上传会在还有占位符时直接失败。
+
+```
+$ python -m shingan publish hf --run-dir artifacts/<run> --dry-run
+publish plan
+┌──────────────┬───────────────────────────────────┬───────────────────┐
+│ artifact     │ destination                       │ placeholders left │
+├──────────────┼───────────────────────────────────┼───────────────────┤
+│ model card   │ shuurai/shingan-qwen3-14b-finrisk │ 63                │
+│ dataset card │ shuurai/shingan-finrisk-labels    │ 23                │
+└──────────────┴───────────────────────────────────┴───────────────────┘
+```
+
+**当前状态:两套卡片都还不能发布。** 模型卡有 63 个未填槽位,数据卡有 23 个。缺的主要是三类东西:
+
+- **训练元数据**——`base_model_revision`、`bnb_version`、`epochs`、`bs`、`cuda_version`、`energy_kwh`/`co2_kg`。这些只有真正跑过 QLoRA 才会有,而 `train lora` 至今没有跑过(见 [`docs/04-training.md`](docs/04-training.md) 第 5 节)。
+- **数据卡的事实字段**——`n_companies`、`n_rows`、`date_range`、`git_commit`、`pos_default`/`pos_fraud`/`pos_tail`、`contains_synthetic`。这些可以直接从面板与标签统计里算出来,但三个标签里有两个(`default_risk`、`fraud_risk`)的真实事件源还没接入,所以它们的正样本数与基率**现在填不了**——不是忘了填,是没有数。
+- **外部链接**——`bench_repo`、`changelog_url`、`known_issues_url`。需要先把对应页面建出来。
+
+### 真正上传前需要做的三件事
+
+1. **把模型卡/数据卡填到零占位符。** 槽位清单就是上面那两条警告,逐项填。数据类字段从面板直接算;训练类字段必须等 LoRA 跑完;填不了的字段**诚实地写"未测量"而不是估一个数**——模板把未填槽位渲染成 `not measured`,这个措辞是刻意选的。
+2. **装依赖**:`pip install huggingface_hub`。当前环境未安装。
+3. **目标仓库必须已经存在。** `publish hf` 走的是 `HfApi.upload_file`,它**不会**自动创建仓库;repo id 写错时会报缺权限,而不是替你新建一个。
+
+### Token 处理
+
+CLI 只从**环境变量** `HF_TOKEN` 读取 token,不读任何配置文件——这一点写死在 `publish_hf` 里,是有意的。`.env.local` 已经被 `.gitignore` 忽略,但代码**不会**自动加载它,所以需要显式注入:
+
+```bash
+# Linux / macOS
+export HF_TOKEN=$(grep -m1 '^HF_TOKEN=' .env.local | cut -d= -f2-)
+python -m shingan publish hf --run-dir artifacts/<run>
+```
+
+```powershell
+# Windows PowerShell
+$env:HF_TOKEN = (Select-String -Path .env.local -Pattern '^HF_TOKEN=' |
+    Select-Object -First 1).Line -replace '^HF_TOKEN=', ''
+python -m shingan publish hf --run-dir artifacts/<run>
+```
+
+`.env.local` 是 `KEY=value` 单行纯文本,上面的写法与它匹配。**不要**把 token 贴进对话、命令历史或 commit message;`.gitignore` 已经挡住 `.env` / `.env.*` / `*.token`,但那条规则挡不住终端历史。
+
+上游还有一条独立的手动路径:`.github/workflows/publish-hf.yml`(`workflow_dispatch`,输入 `repo_id` / `repo_type` / `path`,默认 `dry_run: true`)。它走 GitHub Secret 里的 `HF_TOKEN`,适合把整个产物目录推上去而不是只推一张卡;使用前需要先在仓库 Settings → Secrets 里配置该 secret。
+
+### 上传前应该先确认的边界
+
+**当前没有可上传的模型权重。** `train lora` 从未运行,`artifacts/` 里只有结构化模型(`.joblib`)与评测记录。所以现在能发布的只有卡片本身——而卡片在占位符清零之前会被拒绝。这个顺序是故意的:先把卡片上声称的东西做出来,再把卡片发出去。
+
 ## 状态表
 
 状态口径：

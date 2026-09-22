@@ -200,7 +200,7 @@ class RiskFusion:
         self.diagnostics = {
             "kind": str(self.config.kind),
             "fit_split": self._fit_split,
-            "n_fit_rows": int(len(matrix)),
+            "n_fit_rows": len(matrix),
             "positives_fit": int(np.nansum(y_array >= 0.5)),
             "use_rank_inputs": bool(self.config.use_rank_inputs),
             "inputs": list(self._feature_names),

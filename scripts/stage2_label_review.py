@@ -466,7 +466,7 @@ def main() -> int:
     result = review(panel, derived, threshold)
 
     stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    lines = [f"# Stage 2 — label review record", "", f"Generated {stamp} by "
+    lines = ["# Stage 2 — label review record", "", f"Generated {stamp} by "
              f"`scripts/stage2_label_review.py`.", "",
              f"- Panel: `{panel_path}`", f"- Prices: `{prices_path}`",
              f"- Label: `tail_risk` — running peak-to-trough drawdown over "

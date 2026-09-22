@@ -44,8 +44,10 @@ if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
 from shingan.config import ProjectConfig, load_config  # noqa: E402
-from shingan.data.edgar import CIK_BY_TICKER, SecEdgarClient  # noqa: E402
-from shingan.data.edgar import strip_html  # noqa: E402
+from shingan.data.edgar import (  # noqa: E402
+    CIK_BY_TICKER,
+    SecEdgarClient,
+)
 from shingan.features.text import segment_items  # noqa: E402
 
 DEFAULT_OVERLAY = ROOT / "configs" / "data" / "stage2_real.yaml"
@@ -244,7 +246,7 @@ def resolve_cik_map(client: SecEdgarClient, tickers: list[str]) -> dict[str, str
         cik, expected_name = candidate
         try:
             payload = client.submissions(cik)
-        except Exception as exc:  # noqa: BLE001 - a bad candidate must not stop the fetch
+        except Exception as exc:
             print(f"  ! {ticker}: could not verify candidate CIK {cik}: {exc}")
             unverified.append(ticker)
             continue
@@ -284,7 +286,7 @@ def fetch_fundamentals(
             continue
         try:
             facts = client.facts_to_frame(cik, concepts=tuple(CONCEPT_TO_COLUMN))
-        except Exception as exc:  # noqa: BLE001 - one bad CIK must not kill the fetch
+        except Exception as exc:
             print(f"  ! companyfacts failed for {ticker}: {exc}")
             continue
         if facts.empty:
@@ -354,7 +356,7 @@ def fetch_filings_text(
                 limit=limit_per_ticker,
                 cik=cik_by_ticker.get(ticker),
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             print(f"  ! submissions failed for {ticker}: {exc}")
             continue
         kept = 0
@@ -365,7 +367,7 @@ def fetch_filings_text(
             else:
                 try:
                     text = client.fetch_document(ref.url)
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     print(f"    ! {ref.ticker} {ref.form} {ref.filed}: {exc}")
                     continue
                 cache_file.write_text(text, encoding="utf-8")
@@ -429,7 +431,7 @@ def fetch_filings_metadata(
                 limit=limit_per_ticker,
                 cik=cik_by_ticker.get(ticker),
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             print(f"  ! submissions failed for {ticker}: {exc}")
             continue
         for ref in refs:
