@@ -1198,6 +1198,20 @@ def render_template(template_text: str, values: Mapping[str, Any]) -> tuple[str,
     return rendered, unfilled
 
 
+_EDITORIAL_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+
+
+def strip_editorial_comments(markdown: str) -> str:
+    """Remove HTML comment blocks from rendered card text.
+
+    The card templates carry editor instructions ("replace every placeholder;
+    delete this block before publishing") as HTML comments. A card that ships
+    those instructions contradicts itself, so the renderers strip them: what a
+    dry-run shows is what would be uploaded.
+    """
+    return _EDITORIAL_COMMENT_RE.sub("", markdown).lstrip("\n")
+
+
 def render_model_card(
     values: Mapping[str, Any],
     *,
@@ -1223,7 +1237,8 @@ def render_model_card(
         "data_version": DATA_SCHEMA_VERSION,
     }
     merged = {**defaults, **values}
-    return render_template(path.read_text(encoding="utf-8"), merged)
+    rendered, unfilled = render_template(path.read_text(encoding="utf-8"), merged)
+    return strip_editorial_comments(rendered), unfilled
 
 
 def render_dataset_card(
@@ -1244,7 +1259,8 @@ def render_dataset_card(
         "data_version": DATA_SCHEMA_VERSION,
     }
     merged = {**defaults, **values}
-    return render_template(path.read_text(encoding="utf-8"), merged)
+    rendered, unfilled = render_template(path.read_text(encoding="utf-8"), merged)
+    return strip_editorial_comments(rendered), unfilled
 
 
 def describe_regime(

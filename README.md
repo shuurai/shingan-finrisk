@@ -134,9 +134,9 @@ python -m pytest -m "not network and not gpu and not slow" -q --cov=shingan
 
 | 指标 | 值 |
 | --- | --- |
-| 测试数 | **160 全部通过** |
-| 套件耗时 | **2.0 s**(纯测试)/ **2.7 s**(含解释器启动) |
-| 测试文件 | 9 |
+| 测试数 | **171 全部通过** |
+| 套件耗时 | **3.7 s**(纯测试) |
+| 测试文件 | 10 |
 | 被跳过的分支 | `network` / `gpu` / `slow` 三个 marker,当前无测试落在其中 |
 
 | 文件 | 测试数 | 覆盖的对象 |
@@ -161,7 +161,8 @@ python -m pytest -m "not network and not gpu and not slow" -q --cov=shingan
 | `models/fusion.py` / `models/text_baseline.py` | 79% |
 | `models/structured.py` | 73% |
 | `eval/metrics.py` | 49% |
-| `cli.py` / `data/prices.py` / `data/news.py` | 0% |
+| `cli.py` | 26%(发布与 doctor 路径已覆盖) |
+| `data/prices.py` / `data/news.py` | 0% |
 
 **这个数字低,而且低得有明确原因。** 覆盖率不是本项目的验收标准——README 里唯一有资格充当门槛的是[评测](docs/05-evaluation.md)第 9 节那七个门禁。补测试的唯一理由是防回归,不是把百分比推高:
 
@@ -218,26 +219,35 @@ python -m pytest -m "not network and not gpu and not slow" -q --cov=shingan
 
 发布路径已经写好,但**默认拒绝上传不完整的卡片**。这不是仪式:模型卡的每一个 `{{...}}` 槽位最终都会变成页面上的一句话,而没人核对过的数字一旦发布,就再也收不回来。所以 `--dry-run` 是常规工作流,真实上传会在还有占位符时直接失败。
 
+卡片值有两条注入通道:运行报告自动提供 `run_id` 与 fused 的 AUC;`--values-file` 注入人工核对过的卡片值(数据统计、审计结果、状态声明),**文件值优先于报告值**。生成数据卡值的脚本从面板与标签复核产物里读取,不手抄:
+
+```bash
+python scripts/card_values.py    # -> artifacts/stage2/card_values.json
+python -m shingan publish hf --run-dir artifacts/stage2 \
+    --values-file artifacts/stage2/card_values.json --only dataset --dry-run
 ```
-$ python -m shingan publish hf --run-dir artifacts/<run> --dry-run
+
+当前真实状态(`--only` 存在的原因:两张卡的完成时间不同):
+
+```
 publish plan
 ┌──────────────┬───────────────────────────────────┬───────────────────┐
 │ artifact     │ destination                       │ placeholders left │
 ├──────────────┼───────────────────────────────────┼───────────────────┤
-│ model card   │ shuurai/shingan-qwen3-14b-finrisk │ 63                │
-│ dataset card │ shuurai/shingan-finrisk-labels    │ 23                │
+│ model card   │ shuurai/shingan-qwen3-14b-finrisk │ 62                │
+│ dataset card │ shuurai/shingan-finrisk-labels    │ 0                 │
 └──────────────┴───────────────────────────────────┴───────────────────┘
 ```
 
-**当前状态:两套卡片都还不能发布。** 模型卡有 63 个未填槽位,数据卡有 23 个。缺的主要是三类东西:
+**数据卡今天就可以发布,模型卡不行。** 两者的差距与原因:
 
-- **训练元数据**——`base_model_revision`、`bnb_version`、`epochs`、`bs`、`cuda_version`、`energy_kwh`/`co2_kg`。这些只有真正跑过 QLoRA 才会有,而 `train lora` 至今没有跑过(见 [`docs/04-training.md`](docs/04-training.md) 第 5 节)。
-- **数据卡的事实字段**——`n_companies`、`n_rows`、`date_range`、`git_commit`、`pos_default`/`pos_fraud`/`pos_tail`、`contains_synthetic`。这些可以直接从面板与标签统计里算出来,但三个标签里有两个(`default_risk`、`fraud_risk`)的真实事件源还没接入,所以它们的正样本数与基率**现在填不了**——不是忘了填,是没有数。
-- **外部链接**——`bench_repo`、`changelog_url`、`known_issues_url`。需要先把对应页面建出来。
+- **数据卡:0 占位符,可以发布。** 23 个值全部来自实测产物:面板统计(`n_rows`=2221、`n_companies`=34、`pos_tail`=39)、独立重算(`audit_sample_size`=1778、不一致率 0.00%)、仓库事实(`git_commit`、`changelog_url`)。`default_risk`/`fraud_risk` 的正样本数**没有数可填**——事件源未接入,面板里连标签列都不存在——所以按模板规则如实写 `not measured (event source not connected)`,不估一个数。
+- **模型卡:62 个未填槽位,全部被 `train lora` 阻塞**——`epochs`、`bs`、`cuda_version`、`bnb_version`、`energy_kwh`/`co2_kg` 这些训练元数据只有真正跑过 QLoRA 才会有(见 [`docs/04-training.md`](docs/04-training.md) 第 5 节)。在适配器存在之前发布模型卡,等于发布一个不存在的模型的说明书。
+- 两处 `changelog_url`/`known_issues_url` 已指向本仓库的 `CHANGELOG.md` 与 issues 页;模型卡还缺 `bench_repo` 与 `zenodo_doi`,等评测页与 DOI 就绪。
 
 ### 真正上传前需要做的三件事
 
-1. **把模型卡/数据卡填到零占位符。** 槽位清单就是上面那两条警告,逐项填。数据类字段从面板直接算;训练类字段必须等 LoRA 跑完;填不了的字段**诚实地写"未测量"而不是估一个数**——模板把未填槽位渲染成 `not measured`,这个措辞是刻意选的。
+1. **把所选卡片填到零占位符。** 数据卡已经清零;模型卡等 LoRA 跑完。填不了的字段**诚实地写"未测量"而不是估一个数**——模板把未填槽位渲染成 `not measured`,这个措辞是刻意选的。
 2. **装依赖**:`pip install huggingface_hub`。当前环境未安装。
 3. **目标仓库必须已经存在。** `publish hf` 走的是 `HfApi.upload_file`,它**不会**自动创建仓库;repo id 写错时会报缺权限,而不是替你新建一个。
 
@@ -264,7 +274,7 @@ python -m shingan publish hf --run-dir artifacts/<run>
 
 ### 上传前应该先确认的边界
 
-**当前没有可上传的模型权重。** `train lora` 从未运行,`artifacts/` 里只有结构化模型(`.joblib`)与评测记录。所以现在能发布的只有卡片本身——而卡片在占位符清零之前会被拒绝。这个顺序是故意的:先把卡片上声称的东西做出来,再把卡片发出去。
+**当前没有可上传的模型权重。** `train lora` 从未运行,`artifacts/` 里只有结构化模型(`.joblib`)与评测记录。所以现在能发布的是数据卡(已清零)与模型卡的**渲染稿**——模型卡在占位符清零之前会被拒绝,而占位符清零的路径只有把训练真的跑完。这个顺序是故意的:先把卡片上声称的东西做出来,再把卡片发出去。
 
 ## 状态表
 

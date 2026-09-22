@@ -16,7 +16,9 @@ PROJECT_TAGLINE = "Evidence-grounded financial risk modelling"
 PROJECT_DESCRIPTION_ZH = "心眼：双轨（QLoRA 文本 + 梯度提升结构化信号）金融风险建模 POC"
 
 GITHUB_ORG = "shuurai"
-GITHUB_REPO = "shingan"
+# The repository slug is shingan-finrisk (renamed from shingan); every GitHub link
+# rendered into the HF cards comes from this constant, so it must match the remote.
+GITHUB_REPO = "shingan-finrisk"
 GITHUB_URL = f"https://github.com/{GITHUB_ORG}/{GITHUB_REPO}"
 
 HF_MODEL_ID = f"{GITHUB_ORG}/shingan-qwen3-14b-finrisk"

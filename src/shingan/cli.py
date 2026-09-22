@@ -1092,6 +1092,26 @@ def publish_hf(
         Path | None,
         typer.Option("--run-dir", help="A run directory containing a report JSON."),
     ] = None,
+    values_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--values-file",
+            help=(
+                "JSON object with card values (e.g. artifacts/stage2/card_values.json). "
+                "Merged after the report-derived values, so the file wins."
+            ),
+        ),
+    ] = None,
+    only: Annotated[
+        str,
+        typer.Option(
+            "--only",
+            help=(
+                "Which card to gate and upload: both, dataset, or model. The dataset card "
+                "can be published before the fine-tuned model exists; the model card cannot."
+            ),
+        ),
+    ] = "both",
     repo_model: Annotated[
         str, typer.Option("--repo-model", help="Target model repository id.")
     ] = HF_MODEL_ID,
@@ -1110,9 +1130,18 @@ def publish_hf(
     unfilled ``{{...}}`` slot publishes a claim nobody checked, so ``--dry-run`` is the
     safe default workflow and the real upload refuses to proceed while placeholders remain.
 
+    ``--values-file`` injects human-audited card values (dataset statistics, audit
+    results, status declarations); it overrides the report-derived values. A field that
+    genuinely cannot be measured must be written as ``not measured`` with the reason —
+    never as an estimated number.
+
+    ``--only`` exists because the two cards become complete at different times: the
+    labelled panel is real today, while the model card needs a fine-tuned adapter that
+    does not exist yet. The refusal check and the upload then apply only to the selection.
+
     Requires ``huggingface_hub`` and a token in ``HF_TOKEN``. Until the fine-tuned adapter
-    exists — which it does not, see docs/04-training.md section 5 — the upload path stays
-    untested and this command says so rather than pretending otherwise.
+    exists — which it does not, see docs/04-training.md section 5 — the model-card upload
+    path stays untested and this command says so rather than pretending otherwise.
     """
     _configure_logging(verbose)
     paths = ProjectPaths.from_root(None)
@@ -1129,13 +1158,49 @@ def publish_hf(
         candidates = sorted(Path(run_dir).glob("*.json"))
         if not candidates:
             _fail(f"no report JSON in {run_dir}")
-        report_json = candidates[-1]
-        payload = json.loads(report_json.read_text(encoding="utf-8"))
+        # Auxiliary JSONs (label review, coverage audit) live next to the run report;
+        # the report is the one carrying both a metadata block and a model comparison.
+        # Name order alone picked the wrong file in artifacts/stage2 (label_review.json
+        # sorts after the timestamp-named report).
+        payload: dict[str, Any] | None = None
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(parsed, dict) and "metadata" in parsed and "comparison" in parsed:
+                report_json, payload = candidate, parsed
+        if report_json is None or payload is None:
+            report_json = candidates[-1]
+            try:
+                payload = json.loads(report_json.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                _fail(f"cannot read {report_json}", hint=str(exc))
+        console.print(f"[cyan]report: {report_json}[/cyan]")
         values["run_id"] = payload.get("metadata", {}).get("run_id", "unknown")
         comparison = payload.get("comparison") or []
         for row in comparison:
             if isinstance(row, dict) and row.get("path") == "fused":
                 values[f"auc_{row.get('label')}"] = row.get("auc")
+
+    if values_file is not None:
+        try:
+            extra = json.loads(Path(values_file).read_text(encoding="utf-8"))
+        except OSError as exc:
+            _fail(f"cannot read values file {values_file}", hint=str(exc))
+        except json.JSONDecodeError as exc:
+            _fail(f"values file {values_file} is not valid JSON", hint=str(exc))
+        if not isinstance(extra, dict):
+            _fail(f"values file {values_file} must contain a JSON object of card values")
+        values.update(extra)
+        console.print(f"[cyan]values: {len(extra)} entries from {values_file}[/cyan]")
+
+    if only not in ("both", "dataset", "model"):
+        _fail(
+            f"unknown --only value {only!r}",
+            hint="Use --only both, --only dataset, or --only model.",
+        )
+    selected = {"both": ("model", "dataset"), "dataset": ("dataset",), "model": ("model",)}[only]
 
     model_card, model_missing = render_model_card(
         values, template_path=paths.root / "templates" / "model_card.md"
@@ -1163,13 +1228,17 @@ def publish_hf(
         console.print("[cyan]--dry-run: nothing was uploaded.[/cyan]")
         return
 
-    if model_missing or dataset_missing:
+    missing_by_card = {"model": model_missing, "dataset": dataset_missing}
+    blocking = [name for name in selected if missing_by_card[name]]
+    if blocking:
         _fail(
-            "refusing to upload a card with unfilled placeholders",
+            "refusing to upload a card with unfilled placeholders: "
+            + ", ".join(f"{name} card ({len(missing_by_card[name])})" for name in blocking),
             hint=(
-                "Fill the remaining values (see templates/) or pass --dry-run to print the "
-                "plan and inspect the placeholders. Publishing a card with an unfilled slot "
-                "publishes a claim that was never checked."
+                "Fill the remaining values (see templates/, or pass --values-file) or use "
+                "--dry-run to inspect the plan. Publishing a card with an unfilled slot "
+                "publishes a claim that was never checked. Use --only dataset or --only "
+                "model to gate one card while the other is not ready yet."
             ),
         )
 
@@ -1190,21 +1259,26 @@ def publish_hf(
         )
 
     api = HfApi()
-    api.upload_file(
-        path_or_fileobj=model_card.encode("utf-8"),
-        path_in_repo="README.md",
-        repo_id=repo_model,
-        repo_type="model",
-        commit_message=f"Shingan {__version__} model card",
-    )
-    api.upload_file(
-        path_or_fileobj=dataset_card.encode("utf-8"),
-        path_in_repo="README.md",
-        repo_id=repo_dataset,
-        repo_type="dataset",
-        commit_message=f"Shingan {__version__} dataset card",
-    )
-    console.print(f"uploaded cards to {repo_model} and {repo_dataset}")
+    uploaded: list[str] = []
+    if "model" in selected:
+        api.upload_file(
+            path_or_fileobj=model_card.encode("utf-8"),
+            path_in_repo="README.md",
+            repo_id=repo_model,
+            repo_type="model",
+            commit_message=f"Shingan {__version__} model card",
+        )
+        uploaded.append(f"model card to {repo_model}")
+    if "dataset" in selected:
+        api.upload_file(
+            path_or_fileobj=dataset_card.encode("utf-8"),
+            path_in_repo="README.md",
+            repo_id=repo_dataset,
+            repo_type="dataset",
+            commit_message=f"Shingan {__version__} dataset card",
+        )
+        uploaded.append(f"dataset card to {repo_dataset}")
+    console.print(f"uploaded {', '.join(uploaded)}")
 
 
 def main() -> None:
