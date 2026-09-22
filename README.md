@@ -122,6 +122,8 @@ tests/              pytest 测试套件
 ![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)
 ![license](https://img.shields.io/badge/license-Apache--2.0-blue)
 
+> `ci` 是唯一自动更新的徽章;其余四个是静态的,由下面的命令复现。**门禁表如实报红,不是全绿**——原因见本节末尾。
+
 **CI 跑的是 Linux(`ubuntu-latest`)、Python 3.11、单个 job。** 无 matrix、无 secret、无外部网络——除 `pyproject.toml` 声明的 `requires-python` 与 `data/` 目录名之外,本仓库没有大小写敏感或路径分隔符相关的平台假设。
 
 ```bash
