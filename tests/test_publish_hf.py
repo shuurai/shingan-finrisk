@@ -61,6 +61,12 @@ def _values_file(tmp_path: Path, values: dict[str, str]) -> Path:
     return path
 
 
+def _flat(text: str) -> str:
+    """Collapse all whitespace: rich wraps console lines at terminal width, and the
+    wrap point must not decide whether a message substring counts as present."""
+    return " ".join(text.split())
+
+
 def _install_fake_hub(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     """Stand in for ``huggingface_hub`` so no test can reach the network.
 
@@ -128,14 +134,14 @@ def test_the_refusal_still_blocks_an_incomplete_selected_card(tmp_path):
         ["publish", "hf", "--values-file", str(values_file), "--only", "dataset"],
     )
     assert result.exit_code == 1
-    assert "refusing to upload" in result.output
+    assert "refusing to upload" in _flat(result.output)
 
 
 def test_only_model_still_refuses_while_the_adapter_does_not_exist():
     """The model card has no adapter behind it; gating it alone must still refuse."""
     result = runner.invoke(app, ["publish", "hf", "--only", "model"])
     assert result.exit_code == 1
-    assert "refusing to upload" in result.output
+    assert "refusing to upload" in _flat(result.output)
 
 
 def test_run_dir_prefers_the_report_shape_over_name_order(tmp_path, monkeypatch):
@@ -162,7 +168,7 @@ def test_values_file_must_be_a_json_object(tmp_path):
         app, ["publish", "hf", "--values-file", str(path), "--dry-run"]
     )
     assert result.exit_code == 1
-    assert "must contain a JSON object" in result.output
+    assert "must contain a JSON object" in _flat(result.output)
 
 
 def test_values_file_must_exist(tmp_path):
@@ -170,10 +176,10 @@ def test_values_file_must_exist(tmp_path):
         app, ["publish", "hf", "--values-file", str(tmp_path / "nope.json"), "--dry-run"]
     )
     assert result.exit_code == 1
-    assert "cannot read values file" in result.output
+    assert "cannot read values file" in _flat(result.output)
 
 
 def test_only_rejects_an_unknown_target():
     result = runner.invoke(app, ["publish", "hf", "--only", "universe", "--dry-run"])
     assert result.exit_code == 1
-    assert "unknown --only value" in result.output
+    assert "unknown --only value" in _flat(result.output)
