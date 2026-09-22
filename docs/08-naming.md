@@ -9,9 +9,9 @@
 | 项目名 | Shingan（心眼，"the mind's eye"） |
 | GitHub 仓库 | `shuurai/shingan-finrisk` |
 | Python 包与 CLI | `shingan` |
-| Hugging Face 模型 | `shuurai/shingan-qwen3-14b-finrisk` |
-| Hugging Face 数据集 | `shuurai/shingan-finrisk-labels` |
-| Benchmark | `shuurai/shingan-bench` |
+| Hugging Face 模型 | `shuurai2000/shingan-qwen3-14b-finrisk` |
+| Hugging Face 数据集 | `shuurai2000/shingan-finrisk-labels` |
+| Benchmark | `shuurai2000/shingan-bench` |
 | License | Apache-2.0 |
 
 命名模式：`shingan` 为不可变的词根；`-qwen3-14b-finrisk` 描述基座与任务；`-finrisk-labels` 描述数据集内容；`-bench` 为评测集。词根与后缀之间统一用连字符（`-`），后缀内部用小写与数字，不使用下划线。
@@ -89,9 +89,9 @@
 | 4 | `pyproject.toml` 的 `name`、`[project.scripts]` 入口 | `shingan` | 是 | 与 2、3 同步改 |
 | 5 | `src/shingan/__about__.py` 的版本与项目名常量 | — | 否 | 单一版本来源，见下 |
 | 6 | 环境变量前缀（若有） | `SHINGAN_*` | 是 | 需要提供过渡期的兼容读取 |
-| 7 | HF 模型仓库 | `shuurai/shingan-qwen3-14b-finrisk` | 是 | 可以新建仓库而非改名，旧仓库保留并加 deprecated 说明 |
-| 8 | HF 数据集仓库 | `shuurai/shingan-finrisk-labels` | 是 | 同上 |
-| 9 | Benchmark 仓库 | `shuurai/shingan-bench` | 是 | 同上 |
+| 7 | HF 模型仓库 | `shuurai2000/shingan-qwen3-14b-finrisk` | 是 | 可以新建仓库而非改名，旧仓库保留并加 deprecated 说明 |
+| 8 | HF 数据集仓库 | `shuurai2000/shingan-finrisk-labels` | 是 | 同上 |
+| 9 | Benchmark 仓库 | `shuurai2000/shingan-bench` | 是 | 同上 |
 | 10 | `templates/model_card.md` 的 frontmatter 与正文 | 含模型名 | 否 | 模板，改起来零成本 |
 | 11 | `templates/dataset_card.md` | 含数据集名 | 否 | 同上 |
 | 12 | `docs/` 全部文档的标题与正文 | `Shingan` / `shingan` | 否 | 机械替换，但需人工复核语义通顺 |

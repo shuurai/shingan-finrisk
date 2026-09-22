@@ -18,9 +18,9 @@
 | --- | --- |
 | GitHub 仓库 | `shuurai/shingan-finrisk` |
 | Python 包与 CLI | `shingan` |
-| Hugging Face 模型 | `shuurai/shingan-qwen3-14b-finrisk` |
-| Hugging Face 数据集 | `shuurai/shingan-finrisk-labels` |
-| Benchmark | `shuurai/shingan-bench` |
+| Hugging Face 模型 | `shuurai2000/shingan-qwen3-14b-finrisk` |
+| Hugging Face 数据集 | `shuurai2000/shingan-finrisk-labels` |
+| Benchmark | `shuurai2000/shingan-bench` |
 
 否决理由：
 

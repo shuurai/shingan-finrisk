@@ -21,9 +21,15 @@ GITHUB_ORG = "shuurai"
 GITHUB_REPO = "shingan-finrisk"
 GITHUB_URL = f"https://github.com/{GITHUB_ORG}/{GITHUB_REPO}"
 
-HF_MODEL_ID = f"{GITHUB_ORG}/shingan-qwen3-14b-finrisk"
-HF_DATASET_ID = f"{GITHUB_ORG}/shingan-finrisk-labels"
-HF_BENCHMARK_ID = f"{GITHUB_ORG}/shingan-bench"
+#: The Hugging Face username is NOT the GitHub org: the Hub account is
+#: shuurai2000. Hard-won lesson: deriving the Hub repo id from
+#: GITHUB_ORG produced a 404 on upload because that owner is a
+#: different, unrelated account.
+HF_OWNER = "shuurai2000"
+
+HF_MODEL_ID = f"{HF_OWNER}/shingan-qwen3-14b-finrisk"
+HF_DATASET_ID = f"{HF_OWNER}/shingan-finrisk-labels"
+HF_BENCHMARK_ID = f"{HF_OWNER}/shingan-bench"
 
 #: Model id of the base LLM the text track is fine-tuned from. Kept in sync with
 #: ``configs/train/qlora_qwen3_14b.yaml`` and ``templates/model_card.md``.

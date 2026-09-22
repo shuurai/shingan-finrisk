@@ -80,7 +80,7 @@
 | --- | --- | --- | --- |
 | `Qwen/Qwen3-4B` | 4B | 约 3–4 GB | 仅用于最快打通流水线；能力不足，不用于任何结果 |
 | `Qwen/Qwen3-8B` | 8B | 约 6 GB | **起点**。流水线 bring-up 用 |
-| `Qwen/Qwen3-14B` | 14B | 约 9–12 GB | **正式配置**。HF 发布名 `shuurai/shingan-qwen3-14b-finrisk` |
+| `Qwen/Qwen3-14B` | 14B | 约 9–12 GB | **正式配置**。HF 发布名 `shuurai2000/shingan-qwen3-14b-finrisk` |
 | `Qwen/Qwen3-30B-A3B` | 30B 总 / 3B 激活（MoE） | 与 27B 相当，约 22 GB 量级 | 可行但更紧；MoE 训练在 Windows 上风险更高 |
 
 选择理由：

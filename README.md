@@ -234,8 +234,8 @@ publish plan
 ┌──────────────┬───────────────────────────────────┬───────────────────┐
 │ artifact     │ destination                       │ placeholders left │
 ├──────────────┼───────────────────────────────────┼───────────────────┤
-│ model card   │ shuurai/shingan-qwen3-14b-finrisk │ 62                │
-│ dataset card │ shuurai/shingan-finrisk-labels    │ 0                 │
+│ model card   │ shuurai2000/shingan-qwen3-14b-finrisk │ 62                │
+│ dataset card │ shuurai2000/shingan-finrisk-labels    │ 0                 │
 └──────────────┴───────────────────────────────────┴───────────────────┘
 ```
 

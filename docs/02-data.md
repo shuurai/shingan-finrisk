@@ -265,7 +265,7 @@
 
 1. **可再分发**：合成数据、代码、特征列定义、聚合统计量、模型权重（受 base model 许可约束）、抽取出的短引文（用于 evidence 展示，按 fair use 控制长度）。
 2. **不可再分发**：新闻正文全文、EDGAR 之外的价格面板原始数据、任何商业数据源的原始记录。
-3. HF 上发布的 `shuurai/shingan-finrisk-labels` 只包含**标签与派生特征**，不含原始新闻正文；文本轨训练所需原文由使用者自行从原始来源获取。详见[数据集卡模板](../templates/dataset_card.md)。
+3. HF 上发布的 `shuurai2000/shingan-finrisk-labels` 只包含**标签与派生特征**，不含原始新闻正文；文本轨训练所需原文由使用者自行从原始来源获取。详见[数据集卡模板](../templates/dataset_card.md)。
 
 ## 7. 相关文档
 

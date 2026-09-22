@@ -100,8 +100,8 @@ Documentation = "https://github.com/shuurai/shingan-finrisk/tree/main/docs"
 Repository = "https://github.com/shuurai/shingan-finrisk"
 Issues = "https://github.com/shuurai/shingan-finrisk/issues"
 Changelog = "https://github.com/shuurai/shingan-finrisk/blob/main/CHANGELOG.md"
-"Model card" = "https://huggingface.co/shuurai/shingan-qwen3-14b-finrisk"
-"Dataset card" = "https://huggingface.co/datasets/shuurai/shingan-finrisk-labels"
+"Model card" = "https://huggingface.co/shuurai2000/shingan-qwen3-14b-finrisk"
+"Dataset card" = "https://huggingface.co/datasets/shuurai2000/shingan-finrisk-labels"
 
 [tool.hatch.version]
 path = "src/shingan/__about__.py"

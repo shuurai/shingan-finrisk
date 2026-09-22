@@ -108,7 +108,7 @@ flowchart LR
 ### 4.2 Track B — 文本（QLoRA on Qwen3）
 
 - 代码：`src/shingan/models/lora.py`（指令微调）、`src/shingan/models/text_baseline.py`（非 LLM 基线）、`src/shingan/prompts.py`（模板）
-- 底座：`Qwen/Qwen3-14B`，4-bit nf4 QLoRA。选型推导与显存预算见[训练](04-training.md)；HF 发布名为 `shuurai/shingan-qwen3-14b-finrisk`。
+- 底座：`Qwen/Qwen3-14B`，4-bit nf4 QLoRA。选型推导与显存预算见[训练](04-training.md)；HF 发布名为 `shuurai2000/shingan-qwen3-14b-finrisk`。
 - 输入：某 `as_of` 之前已公开的 10-K/10-Q/8-K 摘录 + 新闻条目 + 一段结构化信号的自然语言摘要。构造见 `shingan data sft`。
 - 输出：一份 JSON，包含 `label`、`severity`、`score`、`horizon_days`、`reasons[]`、`evidence[]`。其中 `score` 才是融合层使用的连续量；其余字段用于人类复核。
 - `text_baseline.py` 提供一条**非 LLM** 的 text-only 路径（词袋/TF-IDF + 线性模型）。它存在的意义是区分"文本有用"与"LLM 有用"：如果 TF-IDF 基线已经追平 14B LoRA，那么 LoRA 的增量价值需要重新论证。
