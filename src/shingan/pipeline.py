@@ -27,7 +27,7 @@ from __future__ import annotations
 import json
 import platform
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,7 +36,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from shingan.__about__ import __version__
+from shingan.__about__ import DATA_SCHEMA_VERSION, __version__
 from shingan.config import ProjectConfig
 from shingan.data.builder import PROMPT_SIGNAL_COLUMNS, BuildResult, build_panel
 from shingan.data.schema import (
@@ -418,6 +418,7 @@ def sft_examples(
     *,
     labels: list[str] | None = None,
     include_news: bool = True,
+    provenance: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
     """Supervised fine-tuning records, per split, for every requested label.
 
@@ -444,6 +445,12 @@ def sft_examples(
         config: Project configuration.
         labels: Labels to emit. Defaults to ``config.labels.targets``.
         include_news: Whether news items are rendered into the prompt.
+        provenance: The ``data`` block recorded in the manifest. Computed by the
+            caller through :func:`shingan.data.provenance.data_provenance`, because
+            only the caller knows which overlay selected the sources and which paths
+            were involved. When omitted, a minimal block is derived from the panel
+            and config alone — sources and shape, no file identities — so a manifest
+            never has to be silent about its provenance.
 
     Returns:
         ``(records_by_split, manifest)``. The manifest records the target rule, the
@@ -561,8 +568,26 @@ def sft_examples(
         "prompts_truncated": truncated,
         "max_seq_length": config.lora.max_seq_length,
         "character_budget": budget,
+        # The data block travels with the split counts, not beside them: a manifest
+        # that says "189 train rows" without saying which panel those rows came from
+        # cannot distinguish a synthetic-SFT run from a real one a month later.
+        "data": dict(provenance) if provenance is not None else _minimal_provenance(panel, config),
     }
     return records, manifest
+
+
+def _minimal_provenance(panel: pd.DataFrame, config: ProjectConfig) -> dict[str, Any]:
+    """Sources and shape only, for a caller that passed no provenance block."""
+    return {
+        "sources": [str(source) for source in config.data.sources],
+        "is_synthetic": bool(panel["is_synthetic"].any())
+        if "is_synthetic" in panel.columns and len(panel)
+        else None,
+        "n_rows": len(panel),
+        "n_tickers": int(panel["ticker"].nunique()) if "ticker" in panel.columns else None,
+        "data_version": str(config.project.data_version),
+        "data_schema_version": DATA_SCHEMA_VERSION,
+    }
 
 
 @dataclass(slots=True)

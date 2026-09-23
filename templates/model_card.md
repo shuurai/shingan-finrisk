@@ -23,6 +23,9 @@ pretty_name: Shingan Qwen3-14B FinRisk
   2. 未实测的字段不要猜数字，写 "not evaluated" 并说明原因。
   3. Evaluation 段只能包含已有可复现报告的数字；没有报告就写 "no real-data evaluation has been performed"。
   4. 发布前删除本注释块与所有未替换的占位符。
+  5. data_provenance / data_sources / training_data_ref 必须取自本次训练 run.json 的
+     data 段（训练与验证文件的 sha256、SFT manifest 及其 raw_files 哈希），不得手工
+     填写来源描述：模板不替任何一次训练断言它用了什么数据。
 -->
 
 # Shingan Qwen3-14B FinRisk
@@ -93,8 +96,9 @@ Shingan（心眼，"the mind's eye"）是一个上市公司**风险评分**研�
 
 | 项 | 值 |
 | --- | --- |
-| 数据类型 | 合成数据 / 真实公开披露文本（视本次发布的版本而定） |
-| 数据来源 | `{{data_sources}}`（SEC EDGAR 10-K/10-Q/8-K、FNSPID 金融新闻、价量面板） |
+| 数据类型 | `{{data_provenance}}` |
+| 数据来源 | `{{data_sources}}` |
+| 训练数据 provenance | `{{training_data_ref}}`（run.json 的 `data` 段：训练/验证文件哈希与 SFT manifest） |
 | 数据集 artifact | `{{dataset_repo}}` |
 | 训练样本数 | `{{n_train_samples}}`（其中正样本 `{{n_train_positives}}`） |
 | 验证样本数 | `{{n_valid_samples}}`（其中正样本 `{{n_valid_positives}}`） |

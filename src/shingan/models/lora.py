@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Any
 
 from shingan.config import LoraConfig
+from shingan.data.provenance import training_data_block
 from shingan.logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -581,6 +582,12 @@ class LoraRunResult:
     #: was mapped. Recorded because the config alone does not say what ran: a key can be
     #: translated (`warmup_ratio` -> `warmup_steps`) or dropped by an older library.
     trainer_arguments: dict[str, Any] = field(default_factory=dict)
+    #: The files this run actually trained and validated on, recorded in ``run.json``
+    #: together with their hashes and the SFT manifest found beside them. A run that
+    #: names its hyperparameters but not its data is half-reproducible, which for the
+    #: synthetic-versus-real question is the same as not reproducible.
+    train_file: Path | None = None
+    eval_file: Path | None = None
 
 
 def train_lora(
@@ -758,6 +765,8 @@ def train_lora(
         split_counts=split_counts,
         adapter_dir=destination / "adapter",
         trainer_arguments=trainer_arguments,
+        train_file=source,
+        eval_file=evaluation,
     )
     result.run_json = _write_run_json(result, config, resolved_seed)
     logger.info("LoRA run finished; adapter at %s", result.adapter_dir)
@@ -796,6 +805,9 @@ def _write_run_json(result: LoraRunResult, config: LoraConfig, seed: int) -> Pat
         "config": config.model_dump(mode="json"),
         "trainer_arguments": result.trainer_arguments,
         "packing": False,
+        # What the run trained on, hashed: the difference between "this adapter was
+        # trained on SEC filings" being checkable and being a sentence in a card.
+        "data": training_data_block(result.train_file, result.eval_file),
         "note": (
             "the reported epoch metrics are selection metrics evaluated on the same "
             "fold the epoch was chosen on; quote the held-out test block from "

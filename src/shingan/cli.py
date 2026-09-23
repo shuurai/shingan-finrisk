@@ -640,6 +640,7 @@ def data_sft(
     )
 
     from shingan.data.builder import build_panel
+    from shingan.data.provenance import data_provenance
     from shingan.data.schema import write_jsonl
     from shingan.pipeline import sft_examples
 
@@ -647,7 +648,12 @@ def data_sft(
     build = build_panel(project, write=False)
     try:
         records, manifest = sft_examples(
-            build.panel, build, project, labels=wanted, include_news=not no_news
+            build.panel,
+            build,
+            project,
+            labels=wanted,
+            include_news=not no_news,
+            provenance=data_provenance(build.panel, project, data_config_path=data_config),
         )
     except ValueError as exc:
         _fail(str(exc))
@@ -1044,7 +1050,9 @@ def eval_lora(
         PATH_LORA,
         PromptIntegrity,
         arms_for_mode,
+        audit_citations,
         build_payload,
+        citation_summary,
         compare_prompts,
         difference_plan,
         paired_differences,
@@ -1219,6 +1227,7 @@ def eval_lora(
     horizon = int(project.labels.horizon_days(label))
     outputs_by_arm: dict[str, list[str]] = {}
     attempts_by_arm: dict[str, list[Any]] = {}
+    citations_by_arm: dict[str, Any] = {}
     scored: dict[str, Any] = {}
     for arm in arms:
         if arm == PATH_LORA:
@@ -1239,6 +1248,15 @@ def eval_lora(
         ]
         outputs_by_arm[arm] = outputs
         attempts_by_arm[arm] = attempts
+        # Evidence fidelity, measured against the prompts actually rendered. Every row
+        # is audited against its own context: a citation is only "resolved" when the
+        # document it names was in *that row's* prompt.
+        contexts_aligned = [contexts[position] for position in positions]
+        citations_by_arm[arm] = audit_citations(
+            [attempt.assessment for attempt in attempts],
+            contexts_aligned,
+            row_ids=[str(sample_ids.iloc[position]) for position in positions],
+        )
         scored[arm] = score_from_attempts(
             truth,
             [attempt.score for attempt in attempts],
@@ -1246,6 +1264,15 @@ def eval_lora(
             label=label,
             path=arm,
             split=split,
+        )
+
+    for arm in arms:
+        audit = citations_by_arm[arm]
+        console.print(
+            f"citations ({arm}): {audit.n_resolved}/{audit.n_citations} document "
+            f"citation(s) resolved to a prompt-rendered document; {audit.n_unresolved} "
+            f"unresolved across {audit.n_rows_with_unresolved} row(s) "
+            f"({audit.n_non_document} non-document, {audit.n_rows_not_audited} not auditable)"
         )
 
     # Per-row predictions, so the aggregate metrics in the artifact can be recomputed
@@ -1262,6 +1289,10 @@ def eval_lora(
                 "score": attempt.score,
                 "parsed": attempt.parsed,
                 "reason": attempt.reason,
+                # Per-row citation fidelity, against this row's own prompt. The
+                # run-level aggregate lives in payload["citations"]; this is what a
+                # reader recomputing the metrics needs to audit any single row.
+                "citations": citation_summary(attempt.assessment, contexts[position]),
                 "raw": text[:raw_cap],
                 "raw_truncated": len(text) > raw_cap,
             }
@@ -1395,6 +1426,7 @@ def eval_lora(
         data=data_info,
         split_definition=build.split_report.to_dict(),
         predictions=predictions,
+        citations={arm: citations_by_arm[arm].as_dict() for arm in arms},
         differences=differences,
         caveats=caveats,
     )

@@ -263,6 +263,34 @@ shingan eval compare --runs structured text fused
 
 训练产物写入 `runs/<timestamp>-<label>-<track>/`，包含：配置快照、环境指纹（torch/CUDA/GPU）、校准器拟合区间、checkpoint 引用、指标 JSON。报告（`eval/report.py`）缺任一字段即视为无效结果。
 
+### 3.1 训练数据的溯源记录（`run.json` 的 `data` 段）
+
+每次 `train lora` 写出的 `run.json` 携带一个 `data` 段（`shingan/data/provenance.py`）：
+
+- `train_file` / `eval_file`：路径、SHA-256、字节数——"这个适配器吃的是什么"变成可校验的哈希，而不是模型卡里的一句话；
+- `sft_manifest`：内嵌训练文件同级目录的 `manifest.json`（该 manifest 自带 `data` 段：来源集合、`is_synthetic`、面板形状与**原始表哈希**），形成 `run.json → SFT manifest → raw 哈希` 的完整链；
+- manifest 缺失或不可读时记录原因（`sft_manifest_note` / `sft_manifest_error`），不留无法解释的 `null`。
+
+注意 SFT 目录约定：`data/processed/sft/` 是合成 contract-v2 语料（与 `artifacts/lora-contract-v2` 配对）；真实语料归档在 `data/processed/sft_stage2_real/`。两个目录只靠名字区分——重新生成前先哈希、后核对（`docs/09` §14.2 记录了一次踩坑与恢复）。
+
+### 3.2 安慰剂对照（ADR-0003 要求的实验）
+
+把训练语料的 **user turn 在每个 split 内固定种子置换**（system 轮与 assistant 目标不动），重训一次。文本→标签的连接被切断，而格式、长度分布、标签分布全部保留：安慰剂适配器若仍输出常量分数，"微调只买到格式"就从推断变成实验结论。
+
+```powershell
+# 1) 生成安慰剂语料（确定性，seed 7；约 1 分钟）
+python scripts/placebo_corpus.py --src data/processed/sft --dst data/processed/sft_placebo --seed 7
+
+# 2) 重训（约 48 分钟 GPU，不覆盖现有产物）
+python -m shingan train lora --train-file data/processed/sft_placebo/train.jsonl --eval-file data/processed/sft_placebo/valid.jsonl --output-dir artifacts/lora-placebo
+
+# 3) 评分（合成面板，与 lora-contract-v2 评测同一配置）
+python -m shingan eval lora --mode adapter --adapter artifacts/lora-placebo/adapter --batch-size 4 --no-verify-prompts
+```
+
+第 3 步必须 `--no-verify-prompts`：重建 prompt 与安慰剂语料**本来就该**不一致，这正是置换的目的。链路完整性改由安慰剂 run.json 的 `data` 段承担（它记录了安慰剂语料的哈希）。对照量：安慰剂适配器 vs `artifacts/lora-contract-v2`（合成评测 `artifacts/lora-eval/20260923T094317Z`，64 行、9 正）的两臂指标与逐行分数。
+
+
 ## 4. 失败模式与修复
 
 | 症状 | 根因 | 修复 |

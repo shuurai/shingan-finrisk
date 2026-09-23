@@ -272,9 +272,9 @@
 ## 8. 本组步骤之外的待办（明确不做，避免被读成已覆盖）
 
 1. **真正不带结构化信号的 text-only 适配器**（D1 的未采纳选项）。ADR-0003 意义上的 `text_only_lora` 需要它。
-2. **`text_only_zero_shot`**：底座模型不带适配器的 zero-shot 行，用于回答"微调是否必要"。
-3. **打乱文本的 placebo 对照**：ADR-0003 明确要求。
-4. **P0 溯源缺口（5 项）**：`run.json` 不含语料溯源（无 source / panel 路径 / 哈希 / `is_synthetic`）；`sft/manifest.json` 同样无 `is_synthetic`；模型卡模板把数据源**硬编码**在 `{{data_sources}}` 旁；模板要求合成训练必须标 `trained_on=synthetic` 但**没有对应占位符**；模板写 `warmup ratio {{warmup}}` 而实际产出的是 `warmup_steps=3`。
+2. ~~**`text_only_zero_shot`**~~ **已完成（§13，`--mode zero_shot|both`）**。
+3. **打乱文本的 placebo 对照**：ADR-0003 明确要求。脚本与命令已备（`scripts/placebo_corpus.py`，[04 训练](04-training.md) §3.2），等 GPU 空闲后执行。
+4. ~~**P0 溯源缺口（5 项）**~~ **已完成（2026-09-23 晚，§14.1）**：`run.json` 与 `sft/manifest.json` 各带 `data` 段（来源 / `is_synthetic` / 形状 / 哈希），模型卡模板的三处硬编码改为占位符。`warmup ratio {{warmup}}` 一处未动——它展示的是配置语义，实际产出 `warmup_steps` 已在 `trainer_arguments` 里如实记录。
 5. **正样本扩容，但要先切分后扩池。** 真实面板 `tail_risk` 的 39 个可观测正样本里有 **29 个（74.4%）落在 `excluded` / `purged`**，且被排除的正是唯一有系统性下跌的 2020 年（见 **7.3.2**）。所以顺序是：先问能不能改切分几何把 2020 用上（同一份数据、同一套代码，滚动窗口已经覆盖它），再决定要不要为更大的股票池付 EDGAR 的下载成本。用 4 个正样本训 14B 只会学到恒定输出 0——**瓶颈是监督密度与切分几何，不是数据来源。**
 6. **`sample_id` 不是唯一键。** `sft_examples` 是每行 × 每标签一条样本，所以 `sample_id` 在三个标签之间重复；任何以它为行标识的下游工具都会把三条样本混成一条。提示词比对必须用 `(sample_id, label)`（本步第一版就踩了这个坑，被 `--verify-prompts` 抓出 260/782 的假不匹配）。尚未审查**其余**以 `sample_id` 为键的下游用途。
 7. **发布模型卡**：必须带 `trained_on=synthetic`，且 Evaluation 段写 `no real-data evaluation has been performed`；而这两条依赖待办 4 的模板修复。
@@ -745,3 +745,84 @@ allocated by PyTorch, and 1.56 GiB is reserved by PyTorch but unallocated.
 | `docs/05-evaluation.md`、`docs/index.md`、`README.md`、`docs/04-training.md` | 状态与数字同步 |
 
 **制品**：`artifacts/lora-contract-v2/`（adapter sha256 `40b017bf1e09dba7…`）、`artifacts/lora-eval/20260923T094317Z`（两臂产物，含 system 轮 782/782 一致的门禁记录）、`data/processed/sft_v1_before_source_type_contract/`（旧语料存档）。旧的 `artifacts/lora/` **原地保留**。
+
+### 14. Step 9 — 溯源链与引用审计（2026-09-23 晚）
+
+0.2.0 发布后回看待办清单，两项"纯 CPU"工作被同日完成。它们分别关掉 §13.10 里
+记录的两个缺口之一，以及模型卡发布的阻塞项。
+
+#### 14.1 P0 溯源：让每个产物能回答"你用的什么数据"
+
+改动前，三个产物都声称描述自己的数据，却都答不出来：
+
+| 产物 | 改动前 | 改动后 |
+| --- | --- | --- |
+| `sft/manifest.json` | 只有切分计数，不记录面板来自哪里 | 新增 `data` 段：`sources`、`is_synthetic`、`n_rows`、`n_tickers`、窗口、`data_schema_version`、`data_config` 路径、**原始表 SHA-256**（`prices/fundamentals/filings/news/events` 各一个 `file_record`） |
+| 训练 `run.json` | 只有超参与训练栈版本 | 新增 `data` 段：训练/验证 JSONL 的路径+SHA-256+字节数，**内嵌同级目录的 `manifest.json`**，形成 `run.json → SFT manifest → raw 哈希` 的完整链 |
+| 模型卡模板 | 第 96–97 行**硬编码**"SEC EDGAR 10-K/10-Q/8-K、FNSPID 金融新闻、价量面板"，与 `{{data_sources}}` 占位符并排——合成语料训出的适配器也会带着这句话发布 | 两行改为 `{{data_provenance}}` / `{{data_sources}}` / `{{training_data_ref}}` 占位符，模板注释明确要求取自 run.json 的 `data` 段 |
+
+新模块 `src/shingan/data/provenance.py` 承载全部逻辑（hashlib/pathlib/json，无重依赖），
+`train lora` 在**加载模型之前**就能调用它——与 `build_sft_config_kwargs` 同一设计理由。
+
+测试：`tests/test_provenance.py`（10 项）。端到端冒烟：合成 SFT 的 manifest 落盘后
+`data` 段齐全。
+
+#### 14.2 事故与恢复：SFT 目录是 `panel.csv` 陷阱的重演
+
+重生成真实 SFT（升级 manifest）时，默认落点 `data/processed/sft/` 覆盖了**合成
+contract-v2 语料**——即 `lora-contract-v2` 适配器实际训练所用的字节。这与
+"`data/processed/` 里合成 `panel.csv` 与真实 `panel.parquet` 只靠文件名区分"是同一
+类缺陷，只是这次踩到了 SFT 上。
+
+恢复过程本身验证了确定性：
+
+1. 覆盖前记录了哈希（train `d321da51…` / 4,013,122 B，valid `ec4a7353…` / 1,590,943 B）。
+2. 真实语料归档到 `data/processed/sft_stage2_real/`（manifest 带真实溯源：34 家、
+   2,221 行、filings.parquet 285,934,250 B 的 SHA-256 等）。
+3. 重新生成默认（合成）SFT，**哈希逐字节一致**——合成生成器 + 本仓库代码是确定性的，
+   这一条现在是被验证过的事实，不是假设。
+
+约定（写进 `docs/02`）：`data/processed/sft/` = 合成 contract-v2 语料（与
+`artifacts/lora-contract-v2` 配对）；`data/processed/sft_stage2_real/` = 真实语料。
+任何"重新生成"之前先哈希、后核对。
+
+#### 14.3 引用审计：`source_ref` 第一次有了校验
+
+§13.10 记录过：`source_ref` 只有 `Field(description=...)` 里的形状说明，没有任何门
+校验——编造的引用能通过所有门（逐字引文检查是对"模型自己点名的文档"做的）。
+本步落地：
+
+- **`document_refs(context)`**：从该行 prompt 实际渲染出的 block 头部推导全部合法
+  引用形态（冒号/空格等价归一化）：`类型 日期 段落 (accession)`、`类型 日期`
+  （SFT 目标用的无段落形态）、`news:源:日期`、`源 日期`。
+- **`citation_summary(assessment, context)` / `audit_citations(...)`**：逐行、逐臂
+  统计解析出的 `filing`/`news` 引用有多少能解析回 prompt 中的文档。
+- **落点**：`eval lora` 的产物新增 `citations` 段（每臂一行），每条 prediction 记录
+  新增 `citations` 字段（未解析引用原文，截 5 条）；markdown 渲染逐臂一行；有未解析
+  引用时追加 caveat。
+
+一个被审计如实暴露的**既有事实**：`pipeline._sft_evidence` 造的训练目标里，新闻引用
+是**光秃秃的源名**（`"reuters"`），而 SYSTEM_PROMPT 教的是 `news:reuters:2020-03-01`。
+光秃源名不解析为任何一篇文章——适配器若复刻训练目标的形状，会在这里被如实计数。这是
+契约缺口的可见痕迹，不是审计的缺陷；修训练目标的引用形状是后续工作（见 §14.5）。
+
+**为什么是披露而不是 gate**（与 §13.10 的"不同保真度"论据互补）：编造引用不使分数
+不可用——丢行会像解析失败丢行一样使排序指标产生偏差。分数照常、引用保真度随行走，
+读"证据化结论"的人先读这一行。
+
+测试：`tests/test_citation_audit.py`（10 项），含"归一化不改变解析结果""accession
+形态解析""非文档类型单独计数""未解析行如实上报"。
+
+#### 14.4 测试与检查
+
+310 项全绿（286 → 310，+24）；ruff 对改动文件零新增（`models/lora.py` 的 SIM108
+经 HEAD 对照确认为既有）。
+
+#### 14.5 未做的事
+
+- **训练目标的引用形状没修**：`_sft_evidence` 的新闻引用应为 `news:源:日期`、文件
+  引用应为含段落的归一化形态。修它会改变全部 SFT 语料 → 必须与下一次重训同批。
+- **安慰剂对照**：脚本已备（`scripts/placebo_corpus.py`，把每个 split 的 user turn
+  固定种子置换；system 轮与 assistant 目标不动），命令在 `docs/04`。GPU 被
+  真实零样本行占用，等它落地后执行。
+- 真实零样本行（`--max-new-tokens 4096` 版）仍在跑；其结果将按 §13.9 的口径补录。

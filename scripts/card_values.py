@@ -178,6 +178,26 @@ def build_values(args: argparse.Namespace) -> dict[str, str]:
     values["git_commit"] = args.git_sha or git_short_sha()
     values.setdefault("build_date", datetime.now(UTC).strftime("%Y-%m-%d"))
     values["source_snapshot_date"] = args.source_snapshot or "not recorded"
+    # Model-card provenance slots, derived from the panel's own is_synthetic flag
+    # rather than asserted: a synthetic-trained adapter must not inherit a source
+    # list describing real filings. The authoritative record is the training
+    # run.json `data` block; these are the readable summaries of it.
+    synthetic = "contains_synthetic" in values and values["contains_synthetic"] == "yes"
+    values["data_provenance"] = (
+        "synthetic data (deterministic generator; see the warning below)"
+        if synthetic
+        else "real public disclosures and market data (see the dataset card for sources)"
+    )
+    values["data_sources"] = (
+        "synthetic generator"
+        if synthetic
+        else "SEC EDGAR filings; news corpus; price/volume panel — as recorded in the "
+        "training run.json `data` block"
+    )
+    values["training_data_ref"] = (
+        "the training run.json `data` block: train/eval JSONL sha256 and the embedded "
+        "SFT manifest (raw-table hashes)"
+    )
     values["rating_history_status"] = "unavailable"
     values["pit_membership_status"] = "not applied"
     values["vendor_lookahead_status"] = (

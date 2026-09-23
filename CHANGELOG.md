@@ -11,15 +11,24 @@ The dataset schema and the label definitions are versioned separately via the
 
 ## [Unreleased]
 
+### Added
+- Data provenance that travels with the artifacts: `sft/manifest.json` and the
+  training `run.json` now carry a `data` block (source set, `is_synthetic`,
+  panel shape, raw-table SHA-256s, and — for training — the hashes of the SFT
+  files plus the embedded SFT manifest). The model card template no longer
+  asserts a source list in prose; its provenance slots must be filled from the
+  run's own record.
+- A citation audit on every `eval lora` arm: each `source_ref` a parsed
+  assessment emits is checked against the documents actually rendered into
+  *that row's* prompt. It is a disclosure, not a gate — unresolved citations
+  never drop rows — reported per arm in `lora_eval.json` and per row in every
+  prediction record.
+
 ### Planned
 - Split-geometry revision so 2020 sits inside the evaluation blocks, then
   positive-sample expansion — in that order: the bottleneck is supervision
   density plus split geometry, not data provenance.
-- A citation-resolution gate: every `source_ref` a model emits should be
-  checkable against the block headers actually rendered into its prompt. Its
-  landing point is before the next adapter re-run, so artifacts keep one
-  fidelity for a metric rather than two.
-- Model card publication, after the provenance fields reach the card template.
+- Model card publication, now that the provenance fields exist in the template.
 - SEC enforcement-action and Item 4.02 restatement parsers to replace the
   proxy events currently used for `fraud_risk`.
 - Point-in-time S&P 500 membership, which is a hard blocker for Stage 4.

@@ -153,6 +153,23 @@
 - **退市**：退市后的行不存在。`tail_risk` 在退市前的窗口若能算出回撤则正常标注；`default_risk` 的破产/违约事件由事件源提供，不依赖价格序列延续。
 - **幸存者偏差**：只取"当前仍是 S&P 500 成分股"的公司集合会系统性丢掉失败公司的历史，直接压低正样本率并高估模型表现。**必须使用历史成分股名单（point-in-time membership）**。POC 阶段的 Stage 2 只取 5–10 家指定公司，该问题不显著，但必须在数据集卡中记录；Stage 4 扩到全 S&P 500 时这是阻塞项。详见[数据集卡模板](../templates/dataset_card.md)的 known biases 一节。
 
+### 4.5 产物溯源与目录约定
+
+每个派生产物必须能回答"你用的什么数据"（`shingan/data/provenance.py`）：
+
+- `sft/manifest.json` 带 `data` 段：来源集合、`is_synthetic`、面板形状、`data_config` 路径与**原始表 SHA-256**（`prices/fundamentals/filings/news/events`）。
+- 训练 `run.json` 的 `data` 段哈希训练/验证 JSONL 并内嵌 SFT manifest，链路 `run.json → SFT manifest → raw 哈希`（见 [04 训练](04-training.md) §3.1）。
+
+目录约定——**同名不同源的陷阱**（`panel.csv` 合成 / `panel.parquet` 真实只靠扩展名区分，SFT 犯过同一次：`docs/09` §14.2）：
+
+| 目录 | 内容 |
+| --- | --- |
+| `data/processed/sft/` | 合成 contract-v2 语料（与 `artifacts/lora-contract-v2` 配对） |
+| `data/processed/sft_stage2_real/` | 真实语料（34 家、2,221 行；manifest 带真实溯源） |
+| `data/processed/sft_placebo/` | 安慰剂语料（user turn 固定种子置换，见 [04 训练](04-training.md) §3.2） |
+
+任何"重新生成"之前先哈希、后核对。
+
 ## 5. 数据字典
 
 `data/processed/` 下的面板数据集，一行 = 一个 `(ticker, as_of)`。列类型为写入 parquet 时的物理类型。

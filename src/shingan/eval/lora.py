@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -38,6 +39,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from shingan.data.schema import SourceType
 from shingan.eval.metrics import (
     ClassificationReport,
     average_precision,
@@ -45,7 +47,7 @@ from shingan.eval.metrics import (
     paired_bootstrap_difference,
     roc_auc,
 )
-from shingan.prompts import SYSTEM_PROMPT
+from shingan.prompts import SYSTEM_PROMPT, PromptContext
 
 logger = logging.getLogger(__name__)
 
@@ -367,6 +369,184 @@ def _first_difference(left: str, right: str) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Citation audit
+# ---------------------------------------------------------------------------
+
+#: Separators the model may choose between when naming a document. The system prompt
+#: teaches colon-joined refs ("10-K:2019-02-26:Item 1A") while the SFT targets were
+#: minted with space-joined ones ("10-K 2019-02-26"); both name the same document, so
+#: a fidelity measure that split on punctuation would count formatting, not fabrication.
+_REF_SEPARATOR = re.compile(r"[\s:]+")
+
+
+def _normalize_ref(ref: str) -> str:
+    """Collapse separator runs so equivalent refs compare equal."""
+    return " ".join(part for part in _REF_SEPARATOR.split(ref.strip()) if part)
+
+
+def document_refs(context: PromptContext) -> set[str]:
+    """Every source_ref shape that resolves to a document rendered into this prompt.
+
+    Three shapes resolve, and the choice is not arbitrary:
+
+    * ``doc_type date section (accession)`` — the block header's own identity, in the
+      colon form the system prompt teaches and the space form the SFT targets used.
+    * ``doc_type date`` without a section — still identifies *the filing* the excerpt
+      was cut from; sections are parts of one document.
+    * ``source date`` for news — the header's ``[published=…, source=…]`` pair.
+
+    A bare source name ("reuters") deliberately does **not** resolve: it names an
+    outlet, not an article, and the adapter's own SFT targets used exactly that shape.
+    The audit counting those as unresolved is the point — it is the visible trace of
+    the training targets never matching the contract the prompt teaches.
+    """
+    refs: set[str] = set()
+    for excerpt in context.filings:
+        refs.add(_normalize_ref(f"{excerpt.doc_type} {excerpt.filed.isoformat()}"))
+        refs.add(_normalize_ref(f"{excerpt.doc_type} {excerpt.filed.isoformat()} {excerpt.section}"))
+        refs.add(_normalize_ref(excerpt.source_ref))
+    for item in context.news:
+        if item.source:
+            refs.add(_normalize_ref(f"{item.source} {item.published.isoformat()}"))
+            refs.add(_normalize_ref(item.source_ref))
+    return refs
+
+
+@dataclass(slots=True)
+class CitationAudit:
+    """Whether a run's evidence citations name documents the prompt actually contained.
+
+    The schema has accepted any string as ``source_ref`` since it was written, so a
+    model that invents a plausible-looking citation passes every gate in the
+    repository — the quote check runs against documents *the model named*, not
+    documents the prompt contained. This audit closes that gap at scoring time: every
+    document-type citation is matched against the refs derived from the very context
+    that was rendered into the row's prompt.
+
+    This is a **disclosure, not a gate and not a metric**. A fabricated citation does
+    not make a score unusable — dropping the row would bias the ranking metrics the
+    same way parse-dropping would — so rows are never removed and nothing is
+    subtracted. The counts travel beside the metrics, and a reader quoting an
+    evidence-grounded claim reads the fidelity line first.
+    """
+
+    #: Rows whose generation parsed and were checked.
+    n_rows_audited: int = 0
+    #: Rows that could not be checked (no parse, or no context) — reported, not hidden.
+    n_rows_not_audited: int = 0
+    #: Audited rows that emitted at least one evidence span.
+    n_rows_with_evidence: int = 0
+    #: Document-type citations (filing/news) checked against the prompt's documents.
+    n_citations: int = 0
+    n_resolved: int = 0
+    n_unresolved: int = 0
+    #: Citations whose source_type is not a prompt document (structured, price, other,
+    #: "unattributed"). Not resolvable by definition; counted so they cannot masquerade
+    #: as either resolved or fabricated.
+    n_non_document: int = 0
+    #: Audited rows carrying at least one unresolved citation.
+    n_rows_with_unresolved: int = 0
+    #: Up to five unresolved citations, for the artifact and the failure message.
+    examples: list[dict[str, Any]] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "n_rows_audited": self.n_rows_audited,
+            "n_rows_not_audited": self.n_rows_not_audited,
+            "n_rows_with_evidence": self.n_rows_with_evidence,
+            "n_citations": self.n_citations,
+            "n_resolved": self.n_resolved,
+            "n_unresolved": self.n_unresolved,
+            "n_non_document": self.n_non_document,
+            "n_rows_with_unresolved": self.n_rows_with_unresolved,
+            "examples": self.examples,
+        }
+
+
+def citation_summary(assessment: Any, context: PromptContext) -> dict[str, Any]:
+    """Citation resolution counts for one row, also embedded in its prediction record.
+
+    Args:
+        assessment: The parsed :class:`~shingan.data.schema.RiskAssessment`, or ``None``
+            when the generation did not parse.
+        context: The prompt context that was rendered for this row.
+
+    Returns:
+        ``{"n_citations", "n_resolved", "n_unresolved", "n_non_document",
+        "unresolved": [...]}`` — the list capped at five entries, the counts exact.
+    """
+    if assessment is None or context is None:
+        return {"n_citations": 0, "n_resolved": 0, "n_unresolved": 0, "n_non_document": 0,
+                "unresolved": [], "not_audited": True}
+    refs = document_refs(context)
+    spans = list(getattr(assessment, "evidence", None) or [])
+    summary: dict[str, Any] = {
+        "n_citations": 0,
+        "n_resolved": 0,
+        "n_unresolved": 0,
+        "n_non_document": 0,
+        "unresolved": [],
+    }
+    for span in spans:
+        source_type = getattr(span, "source_type", None)
+        source_type = getattr(source_type, "value", source_type)
+        ref = str(getattr(span, "source_ref", "") or "")
+        if source_type not in (SourceType.FILING.value, SourceType.NEWS.value):
+            summary["n_non_document"] += 1
+            continue
+        summary["n_citations"] += 1
+        if _normalize_ref(ref) in refs:
+            summary["n_resolved"] += 1
+        else:
+            summary["n_unresolved"] += 1
+            if len(summary["unresolved"]) < 5:
+                summary["unresolved"].append({"source_type": source_type, "source_ref": ref[:120]})
+    return summary
+
+
+def audit_citations(
+    assessments: Sequence[Any],
+    contexts: Sequence[PromptContext | None],
+    *,
+    row_ids: Sequence[Any] | None = None,
+) -> CitationAudit:
+    """Fold per-row citation summaries into the run-level :class:`CitationAudit`.
+
+    Args:
+        assessments: One parsed assessment per attempted row, ``None`` where the
+            generation did not parse. Pass the same sequence, in the same order, that
+            ``score_from_attempts`` received.
+        contexts: The prompt context per attempted row, aligned with ``assessments``.
+        row_ids: Optional stable identifiers (the sample ids) used in ``examples``;
+            positional indexes when omitted.
+
+    Returns:
+        The :class:`CitationAudit`.
+    """
+    audit = CitationAudit()
+    for index, (assessment, context) in enumerate(zip(assessments, contexts, strict=True)):
+        if assessment is None or context is None:
+            audit.n_rows_not_audited += 1
+            continue
+        audit.n_rows_audited += 1
+        summary = citation_summary(assessment, context)
+        if not (assessment.evidence or ()):
+            continue
+        audit.n_rows_with_evidence += 1
+        audit.n_citations += summary["n_citations"]
+        audit.n_resolved += summary["n_resolved"]
+        audit.n_unresolved += summary["n_unresolved"]
+        audit.n_non_document += summary["n_non_document"]
+        if summary["n_unresolved"]:
+            audit.n_rows_with_unresolved += 1
+            row_id = row_ids[index] if row_ids is not None else index
+            for item in summary["unresolved"]:
+                if len(audit.examples) < 5:
+                    audit.examples.append({"row": row_id, **item})
+    return audit
+
+
 @dataclass(slots=True)
 class ScoredRun:
     """A metric row plus the accounting that decides whether it may be quoted."""
@@ -581,6 +761,7 @@ def build_payload(
     data: Mapping[str, Any],
     split_definition: Mapping[str, Any] | None = None,
     predictions: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+    citations: Mapping[str, Any] | None = None,
     differences: Sequence[Mapping[str, Any]] = (),
     caveats: Sequence[str] = (),
 ) -> dict[str, Any]:
@@ -645,6 +826,14 @@ def build_payload(
                 "and were dropped; that arm's metrics are conditional on the model "
                 "producing usable output"
             )
+    for arm, audit in sorted((citations or {}).items()):
+        unresolved = int(audit.get("n_unresolved", 0))
+        if unresolved:
+            fixed_caveats.append(
+                f"{arm}: {unresolved} of {audit.get('n_citations', 0)} evidence "
+                "citation(s) named no document rendered into that row's prompt; the "
+                "scores stand, but any evidence-grounded reading of those rows does not"
+            )
     return {
         "metadata": {
             "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -659,6 +848,7 @@ def build_payload(
         "prompt": dict(prompt),
         "rows": [dict(row) for row in rows],
         "parse": {arm: scored[arm].parse_dict() for arm in arms},
+        "citations": {arm: dict(item) for arm, item in sorted((citations or {}).items())},
         "differences": [dict(item) for item in differences],
         "predictions": {
             arm: [dict(item) for item in (predictions or {}).get(arm, ())] for arm in arms
@@ -757,6 +947,22 @@ def render_markdown(payload: Mapping[str, Any]) -> str:
             f"failure rate {accounting['parse_failure_rate']:.4f}, "
             f"dropped positives {accounting['n_dropped_positives']}"
         )
+        citations = payload.get("citations", {}).get(arm)
+        if not citations:
+            continue
+        total = citations.get("n_citations", 0)
+        resolved = citations.get("n_resolved", 0)
+        unresolved = citations.get("n_unresolved", 0)
+        non_document = citations.get("n_non_document", 0)
+        detail = (
+            f"- citations ({arm}): {resolved}/{total} document citation(s) resolved to a "
+            f"document rendered into that row's prompt; {unresolved} unresolved across "
+            f"{citations.get('n_rows_with_unresolved', 0)} row(s), "
+            f"{non_document} non-document (structured/price/other)"
+        )
+        if citations.get("n_rows_not_audited"):
+            detail += f"; {citations['n_rows_not_audited']} row(s) not auditable (no parse)"
+        lines.append(detail)
     lines += [
         "",
         "## Caveats",
@@ -825,12 +1031,16 @@ __all__ = [
     "PATH_ZERO_SHOT",
     "PROMPT_DISCLOSURE",
     "ZERO_SHOT_DISCLOSURE",
+    "CitationAudit",
     "PromptIntegrity",
     "ScoredRun",
     "arms_for_mode",
+    "audit_citations",
     "build_payload",
+    "citation_summary",
     "compare_prompts",
     "difference_plan",
+    "document_refs",
     "paired_differences",
     "render_markdown",
     "score_from_attempts",
