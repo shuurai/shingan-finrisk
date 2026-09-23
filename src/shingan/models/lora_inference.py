@@ -12,10 +12,17 @@ is tested without one:
 
 * :func:`adapter_facts` hashes what the adapter directory contains. Its identity has
   to travel with the numbers, or a score cannot be traced back to a file.
+* :func:`describe_model` resolves *which* weights a run will load — base model, tokenizer,
+  quantisation — without loading them, so the identity can be asserted in CI.
 * :func:`score_generation` turns one raw generation into a score, through the same
   parser the data builder validates its targets with. No second parser exists.
 * :func:`load_for_inference` and :func:`generate_texts` are the only functions that
   import torch, and therefore the only ones CI cannot exercise.
+
+Scoring the base model *without* the adapter is a first-class mode (:data:`MODE_ZERO_SHOT`),
+not a special case. The project's central claim is that the fine-tune adds something over
+the untuned model, and that claim is a difference between two arms: it can only be
+measured on one prompt set, in one process, with one tokenizer.
 
 The tokenizer question deserves the explicit note it gets on
 :data:`TOKENIZER_MARKERS`, because it is silent when it goes wrong.
@@ -57,6 +64,21 @@ TOKENIZER_MARKERS: tuple[str, ...] = ("tokenizer_config.json", "tokenizer.json")
 
 #: Weight files an adapter may be stored in, in preference order.
 ADAPTER_WEIGHT_FILES: tuple[str, ...] = ("adapter_model.safetensors", "adapter_model.bin")
+
+#: Quantisation the loader applies. Named as constants rather than inline literals
+#: because :func:`describe_model` writes them into the artifact: a recorded
+#: quantisation that drifts from the one actually loaded is a provenance bug that no
+#: metric can reveal.
+QUANT_TYPE = "nf4"
+DOUBLE_QUANT = True
+
+#: Which weights a run scores. ``MODE_BOTH`` exists because the increment the project
+#: is looking for — what the fine-tune bought over the base model — is a *difference*,
+#: and a difference between two runs of two commands is not a paired measurement.
+MODE_ADAPTER = "adapter"
+MODE_ZERO_SHOT = "zero_shot"
+MODE_BOTH = "both"
+SCORING_MODES: tuple[str, ...] = (MODE_ADAPTER, MODE_ZERO_SHOT, MODE_BOTH)
 
 
 class MissingInferenceDependencies(RuntimeError):
@@ -215,34 +237,200 @@ def score_generation(
     return ScoreAttempt(score=float(assessment.score), assessment=assessment)
 
 
+@dataclass(slots=True)
+class ModelIdentity:
+    """Which weights produced a score, and which tokenizer rendered the prompt.
+
+    The adapter facts used to *be* the answer to that question, which was complete while
+    the only way to score was to load an adapter. A zero-shot arm has no adapter: what
+    identifies it is the base weights plus the template they were shown. So identity
+    moved up a level and the adapter facts became one field of it — with ``adapter``
+    ``None`` when no adapter takes part, and ``base_model_source`` still recording where
+    the base weights came from.
+
+    The tokenizer fields are deliberately independent of ``adapter``. A zero-shot run
+    whose base model was read out of an adapter directory must still render its prompts
+    with *that directory's* tokenizer, or the two arms differ in tokenisation as well as
+    in weights and the comparison measures both changes at once.
+    """
+
+    mode: str
+    base_model: str
+    base_model_source: str
+    tokenizer_source: str
+    tokenizer_path: str
+    quantization: str
+    adapter: AdapterFacts | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "base_model": self.base_model,
+            "base_model_source": self.base_model_source,
+            "tokenizer_source": self.tokenizer_source,
+            "tokenizer_path": self.tokenizer_path,
+            "quantization": self.quantization,
+            "adapter": self.adapter.as_dict() if self.adapter is not None else None,
+        }
+
+
+def _quantisation_description(load_in_4bit: bool, compute_dtype: str) -> str:
+    if not load_in_4bit:
+        return f"{compute_dtype}, unquantised"
+    suffix = " double-quantised" if DOUBLE_QUANT else ""
+    return f"4-bit {QUANT_TYPE}{suffix}, {compute_dtype} compute"
+
+
+def describe_model(
+    *,
+    mode: str,
+    adapter_dir: Path | None = None,
+    base_model: str | None = None,
+    load_in_4bit: bool = True,
+    compute_dtype: str = "bfloat16",
+) -> ModelIdentity:
+    """Work out what a run will load, without loading it.
+
+    Pure — it reads and hashes the adapter directory but imports no torch — so the
+    identity that travels with an artifact can be asserted in CI. :func:`load_for_inference`
+    takes this description as its input instead of resolving the same facts a second time,
+    because two implementations of "which base model" would eventually be two answers.
+
+    Args:
+        mode: One of :data:`SCORING_MODES`.
+        adapter_dir: Adapter directory, when the run involves one.
+        base_model: Base model named explicitly. Only used when there is no adapter
+            directory, because an adapter directory states its own base.
+        load_in_4bit: Recorded in the description; the loader quantises with the same
+            argument.
+        compute_dtype: Likewise.
+
+    Returns:
+        The :class:`ModelIdentity`.
+
+    Raises:
+        ValueError: If the mode is unknown, if neither an adapter directory nor a base
+            model was given, or if both were given and disagree about the base weights.
+            That last one is refused rather than resolved: a run whose arms sit on
+            different base weights measures the difference between two models, not the
+            effect of fine-tuning, and it would look like an ordinary result.
+    """
+    if mode not in SCORING_MODES:
+        raise ValueError(f"unknown scoring mode {mode!r}; choose one of {list(SCORING_MODES)}")
+
+    facts = adapter_facts(adapter_dir) if adapter_dir is not None else None
+    if facts is not None:
+        if base_model is not None and base_model != facts.base_model:
+            raise ValueError(
+                f"base model {base_model!r} was named explicitly but {facts.directory} "
+                f"was trained from {facts.base_model!r}. Refusing to score a run whose "
+                "arms would not share their base weights."
+            )
+        resolved = facts.base_model
+        base_model_source = f"adapter directory ({facts.directory})"
+        tokenizer_source = facts.tokenizer_source
+        tokenizer_path = (
+            str(facts.directory) if facts.tokenizer_source == "adapter directory" else resolved
+        )
+    else:
+        if not base_model:
+            raise ValueError(
+                "nothing to describe: pass an adapter directory (which names its base "
+                "model) or a base model explicitly"
+            )
+        resolved = base_model
+        base_model_source = "named explicitly"
+        tokenizer_source = "base model"
+        tokenizer_path = resolved
+
+    return ModelIdentity(
+        mode=mode,
+        base_model=resolved,
+        base_model_source=base_model_source,
+        tokenizer_source=tokenizer_source,
+        tokenizer_path=tokenizer_path,
+        quantization=_quantisation_description(load_in_4bit, compute_dtype),
+        # Set only when an adapter is actually scored. A zero-shot run that read its base
+        # model out of an adapter directory names no adapter, and saying otherwise would
+        # put an adapter's hash next to numbers it never touched.
+        adapter=facts if mode in (MODE_ADAPTER, MODE_BOTH) else None,
+    )
+
+
+def attach_adapter(model: Any, identity: ModelIdentity) -> Any:
+    """Wrap ``model`` with the adapter named in ``identity``.
+
+    Separate from :func:`load_for_inference` so that a run scoring both arms can score
+    the base arm first: attaching mutates the model that would be scored. Called exactly
+    once per run, immediately before the adapter arm, so there is one place where the
+    adapter enters the process.
+
+    Args:
+        model: The base model, already loaded and in eval mode.
+        identity: The identity, which must name an adapter.
+
+    Returns:
+        The wrapped model.
+
+    Raises:
+        ValueError: If the identity names no adapter. Silently returning the base model
+            would make an "adapter" row that is really a zero-shot row.
+    """
+    if identity.adapter is None:
+        raise ValueError(
+            "this identity names no adapter, so there is nothing to attach; the row it "
+            "would produce is the base model's, not the adapter's"
+        )
+    from peft import PeftModel
+
+    wrapped = PeftModel.from_pretrained(model, str(identity.adapter.directory))
+    wrapped.eval()
+    logger.info("attached adapter %s", identity.adapter.directory)
+    return wrapped
+
+
 def load_for_inference(
-    adapter_dir: Path,
+    identity: ModelIdentity,
     *,
     device_map: str = "auto",
     attn_implementation: str = "sdpa",
     load_in_4bit: bool = True,
     compute_dtype: str = "bfloat16",
-) -> tuple[Any, Any, AdapterFacts]:
-    """Load base weights plus the adapter, and the tokenizer the adapter was trained with.
+    attach: bool = False,
+) -> tuple[Any, Any]:
+    """Load the weights ``identity`` describes, and the tokenizer its prompts need.
 
     The quantization settings mirror training (4-bit NF4 with double quantisation), so
-    that the adapter is evaluated on the same numerical substrate it was fitted on.
+    that an adapter is evaluated on the same numerical substrate it was fitted on — and
+    so that the base arm of a two-arm run differs from the adapter arm in its weights and
+    nothing else.
+
+    The adapter is attached only when ``attach=True``; a two-arm run loads the base,
+    scores it, and then calls :func:`attach_adapter`.
 
     Args:
-        adapter_dir: Directory written by ``shingan train lora``.
+        identity: What to load, from :func:`describe_model`.
         device_map: Passed to ``from_pretrained``. ``"auto"`` places the 4-bit weights
-            on the GPU when one is visible.
+            on the GPU when one is visible; ``"none"`` leaves placement to the default.
         attn_implementation: Attention kernel. ``sdpa`` matches the training config.
         load_in_4bit: Quantise the base weights. Off needs ~28 GB of VRAM for a 14B
             model in bf16.
         compute_dtype: Dtype for the quantized matmuls.
+        attach: Attach ``identity.adapter`` after loading. Requires that it names one.
 
     Returns:
-        ``(model, tokenizer, facts)``.
+        ``(model, tokenizer)``.
 
     Raises:
         MissingInferenceDependencies: If the stack is absent.
+        ValueError: If ``attach`` was asked for and the identity names no adapter.
     """
+    if attach and identity.adapter is None:
+        raise ValueError(
+            f"attach=True but the identity names no adapter; mode {identity.mode!r} does "
+            "not score an adapter arm"
+        )
+
     missing = missing_inference_modules()
     if missing:
         raise MissingInferenceDependencies(
@@ -251,42 +439,40 @@ def load_for_inference(
 
     import torch
     import transformers
-    from peft import PeftModel
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
-    facts = adapter_facts(adapter_dir)
-    # The tokenizer comes from the adapter directory when it has one — see
-    # TOKENIZER_MARKERS. `facts.tokenizer_source` records which happened.
-    tokenizer_path = (
-        str(facts.directory) if facts.tokenizer_source == "adapter directory" else facts.base_model
-    )
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+    # The tokenizer is named by the identity, not derived from the base model: the
+    # adapter directory carries the tokenizer it was trained with, and the two can
+    # disagree (see TOKENIZER_MARKERS). `identity.tokenizer_source` records which was used.
+    tokenizer = AutoTokenizer.from_pretrained(identity.tokenizer_path)
 
     quantization = None
     if load_in_4bit:
         quantization = BitsAndBytesConfig(
             load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type=QUANT_TYPE,
+            bnb_4bit_use_double_quant=DOUBLE_QUANT,
             bnb_4bit_compute_dtype=getattr(torch, compute_dtype),
         )
 
     model = AutoModelForCausalLM.from_pretrained(
-        facts.base_model,
+        identity.base_model,
         quantization_config=quantization,
         device_map=device_map if device_map != "none" else None,
         attn_implementation=attn_implementation,
         **{dtype_keyword(transformers.__version__): getattr(torch, compute_dtype)},
     )
-    model = PeftModel.from_pretrained(model, str(facts.directory))
     model.eval()
+    if attach:
+        model = attach_adapter(model, identity)
     logger.info(
-        "loaded adapter %s (base %s, tokenizer from %s)",
-        facts.directory,
-        facts.base_model,
-        facts.tokenizer_source,
+        "loaded base %s (from %s, tokenizer from %s), mode %s",
+        identity.base_model,
+        identity.base_model_source,
+        identity.tokenizer_source,
+        identity.mode,
     )
-    return model, tokenizer, facts
+    return model, tokenizer
 
 
 def generate_texts(

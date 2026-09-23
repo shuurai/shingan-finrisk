@@ -1,7 +1,7 @@
 # Shingan 心眼
 
 [![ci](https://github.com/shuurai/shingan-finrisk/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/shuurai/shingan-finrisk/actions/workflows/ci.yml)
-![tests](https://img.shields.io/badge/tests-245%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-277%20passed-brightgreen)
 ![coverage](https://img.shields.io/badge/coverage-43%25-yellow)
 ![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)
 ![license](https://img.shields.io/badge/license-Apache--2.0-blue)
@@ -26,7 +26,7 @@
 - **双轨架构**：Track A 是结构化信号上的校准梯度提升模型；Track B 是读取 SEC 文件与新闻的 QLoRA 指令微调模型；一层薄 fusion 融合两路。目标是在严格 point-in-time 纪律与 purge/embargo 时序验证下的排序质量与校准，**不是收益预测**。
 - **三个标签**：`default_risk`（评级下调/破产，365 天）、`fraud_risk`（重述/执法/非标审计意见，730 天）、`tail_risk`（30 交易日回撤劣于 −30%），均在同一套 as-of/无前视纪律下计算。
 - **硬性评测要求**：任何声称有效的模型必须同时给出 structured-only、text-only、fused 三路结果加无模型基线；而因为文本轨的 prompt 里带着 `STRUCTURED_SIGNALS` 块，还必须给出**同信息量基线** `structured_matched`（同一估计器、只用 prompt 里那 12 个信号）——`text-only − structured_matched` 才是"文本带来了什么"。
-- **当前状态**：流水线在合成数据上端到端可跑；真实数据（34 家公司、`tail_risk`、2221 行面板）上已有**四行对比**——structured AUC 0.6294 / KS 0.4407 / PR-AUC 0.0160、同信息量基线 `structured_matched` 0.7497、文本基线 0.3281、fused 0.6924。但 test 块只有 **5 个正样本**，融合增益区间 **跨零**，因此**不构成性能结论**；文本轨的贡献仍是**未知**。QLoRA 已训出一个真实底座的 adapter（Qwen3-14B / 108 步），但同分布评测显示它的输出是**常量**（AUC 恰 0.5），所以它证明的是训练链路可用、不是预测能力（[09 LoRA 评测](docs/09-lora-evaluation.md)）。**这条路上的真正瓶颈是监督密度**：真实的 39 个可观测正样本里有 29 个落在切分空档（2020 整年被 `valid`/`test` 夹掉）。
+- **当前状态**：流水线在合成数据上端到端可跑；真实数据（34 家公司、`tail_risk`、2221 行面板）上已有**四行对比**——structured AUC 0.6294 / KS 0.4407 / PR-AUC 0.0160、同信息量基线 `structured_matched` 0.7497、文本基线 0.3281、fused 0.6924。但 test 块只有 **5 个正样本**，融合增益区间 **跨零**，因此**不构成性能结论**；文本轨的贡献仍是**未知**。QLoRA 已训出一个真实底座的 adapter（Qwen3-14B / 108 步），但同分布评测显示它的输出是**常量**（AUC 恰 0.5），所以它证明的是训练链路可用、不是预测能力（[09 LoRA 评测](docs/09-lora-evaluation.md)）。零样本对照臂（底座模型不带适配器）**已经能跑**（`shingan eval lora --mode both`），但它在合成 test 块上 64 行里只有 4 行通过 schema 校验、9 个正样本全丢，所以它同样是**没测到**，不是"零样本没用"。**这条路上的真正瓶颈是监督密度**：真实的 39 个可观测正样本里有 29 个落在切分空档（2020 整年被 `valid`/`test` 夹掉）。
 - **已发布**：数据卡 [`shuurai2000/shingan-finrisk-labels`](https://huggingface.co/datasets/shuurai2000/shingan-finrisk-labels)（英文，0 占位符，全部为实测值）。
 - 设计文档在 [`docs/`](docs/)（中文），标注数据集卡模板在 [`templates/`](templates/)。
 
@@ -146,15 +146,16 @@ python -m pytest -m "not network and not gpu and not slow" -q --cov=shingan
 
 | Metric | Value |
 | --- | --- |
-| Tests | **245 passing** |
+| Tests | **277 passing** |
 | Suite time | **~6 s** (tests only); ~9 s with coverage |
-| Test files | 14 |
+| Test files | 15 |
 | Skipped branches | the `network` / `gpu` / `slow` markers — no tests currently live under them. Two tests in `test_lora_arguments.py` skip themselves where the `train` extra is absent: they check the mapping against the *installed* trainer signature, which is the whole point of them |
 
 | File | Tests | Covers |
 | --- | --- | --- |
 | [`tests/test_metrics.py`](tests/test_metrics.py) | 43 | AUC / KS / PR-AUC / ECE / capture, tied-score behaviour, sklearn cross-check |
-| [`tests/test_lora_eval.py`](tests/test_lora_eval.py) | 36 | `(sample_id, label)` as the prompt-comparison key, parse-failure taxonomy, strict JSON (`NaN` is not JSON), paired-bootstrap sign and degeneracy, adapter fingerprinting |
+| [`tests/test_lora_eval.py`](tests/test_lora_eval.py) | 38 | `(sample_id, label)` as the prompt-comparison key, parse-failure taxonomy, strict JSON (`NaN` is not JSON), paired-bootstrap sign and degeneracy, adapter fingerprinting, the row set of a comparison being stated rather than only counted, and the system turn being part of the prompt check |
+| [`tests/test_zero_shot.py`](tests/test_zero_shot.py) | 30 | the mode-to-arm mapping and why the adapter arm must run last, the comparison-grouping plan, model-identity resolution and refusal (including two disagreeing base models), refusing a bad call *before* importing `peft`/`torch`, and the zero-shot artifact's three disclosures |
 | [`tests/test_caveats.py`](tests/test_caveats.py) | 22 | missing-feature diagnostics, grouping by source, actionable advice, disclosure of years a window does not cover |
 | [`tests/test_models.py`](tests/test_models.py) | 22 | persistence contracts and round-trips for the three tracks, ablation-table completeness |
 | [`tests/test_sec_docs.py`](tests/test_sec_docs.py) | 22 | EDGAR archive URL assembly, UA validation, partial-write protection, resume |
@@ -172,16 +173,16 @@ python -m pytest -m "not network and not gpu and not slow" -q --cov=shingan
 
 | Scope | Statement coverage |
 | --- | --- |
-| **Total** | **43%** (6,380 statements, 3,349 missed) |
+| **Total** | **43%** (6,531 statements, 3,388 missed) |
 | `models/persistence.py` | 100% |
-| `eval/lora.py` | 89% |
+| `eval/lora.py` | 91% |
 | `features/text.py` | 86% |
 | `models/fusion.py` / `models/text_baseline.py` | 79% |
 | `eval/metrics.py` | 74% |
 | `models/structured.py` | 72% |
-| `models/lora_inference.py` | 58% (prompt assembly, adapter fingerprinting and the parse taxonomy are covered; the parts that need a GPU are not) |
+| `models/lora_inference.py` | 68% (prompt assembly, adapter fingerprinting, the parse taxonomy and the model-identity / mode resolution are covered; the parts that need a GPU are not) |
 | `models/lora.py` | 33% (the argument mapping is pure and covered; the training loop needs the GPU) |
-| `cli.py` | 24% (publish and doctor paths covered) |
+| `cli.py` | 22% (publish and doctor paths covered) |
 | `data/prices.py` / `data/news.py` | 0% |
 
 **The number is low, and low for a stated reason.** Coverage is not this project's acceptance criterion — the only thing qualified to act as a gate is the seven gates in section 9 of the [evaluation doc](docs/05-evaluation.md). The only legitimate reason to add a test is regression protection, not pushing a percentage up:
@@ -316,7 +317,8 @@ Status vocabulary:
 | Price data adapter (yfinance / Stooq) | Implemented · verified (yfinance returned daily bars for 31/34 tickers) |
 | News adapter (FNSPID, offline dataset) | Interface defined · unverified |
 | QLoRA training | Implemented · verified for the *link* — `artifacts/lora/adapter/` is a completed 108-step 14B adapter. **But its output is constant under in-distribution evaluation** (AUC exactly 0.5000, every row the same score), so it is evidence that the stack works on 32 GB, not evidence of predictive power |
-| LoRA inference and scoring path (`shingan eval lora`) | Implemented · verified (training prompts rebuilt byte-identically, 260/260, under `--verify-prompts`) |
+| LoRA inference and scoring path (`shingan eval lora`) | Implemented · verified (three `--mode` values: `adapter` (default, unchanged), `zero_shot`, and `both` — the two arms run in one process on one set of base weights, one tokenizer and one prompt set, because the difference between them *is* the measurement; training prompts rebuilt byte-identically, 260/260 user turns **and 782/782 system turns**, under `--verify-prompts`) |
+| Zero-shot arm `text_only_zero_shot` (`--mode both`) | Produced · **not citable** — on the synthetic test block only 4 of 64 rows parse (failure rate 0.9375) and **all 9 positives are dropped**, so AUC / PR-AUC cannot be computed. The cause is a hole in the instruction contract (`SYSTEM_PROMPT` never enumerates `source_type`), not model skill: this reads "not measured", not "no skill" |
 | Same-information control `structured_matched` | Implemented · verified (a row of the standard report since 2026-09-23; the LoRA prompt carries twelve structured signals, so subtracting from the full-feature `structured` mixes information sets with model classes) |
 | Fusion layer | Implemented · verified (gain over structured-only on real data **crosses zero**) |
 | **Real-data result (34 companies / 2,221-row panel)** | **structured AUC 0.6294 / KS 0.4407 / PR-AUC 0.0160; `structured_matched` 0.7497; text baseline 0.3281; fused 0.6924** on 492 test rows holding **5 positives** — see the honesty statement: this is not a performance claim |
@@ -333,7 +335,7 @@ Stage 2 has run on real data; the current artifacts are in `artifacts/reports/`.
 
 - **The test block has 5 positives.** AUC 0.6294 rests on 5 positive examples; swapping any one would move it materially. Per section 10 of the [evaluation doc](docs/05-evaluation.md) this triggers F8: it is not a performance claim, only evidence that the pipeline can compute interval-carrying metrics (or state clearly why it cannot) on real data. The same run is the reason `ks_direction` now travels with `ks`: the text baseline posts AUC 0.3281 (an inverted ranking) alongside a KS of 0.5692, and a direction-agnostic KS printed alone reads as the strongest separation in the table.
 - **The fusion layer still adds nothing measurable.** Fused PR-AUC is 0.0030 above structured-only, with an interval that **crosses zero** ([−0.0008, 0.0157]). The text track provides no measurable increment — and that is exactly the question this project set out to answer. The current answer is "not shown", not "yes".
-- **The text track's own number is a constant, not a weak model.** In-distribution, `text_only_lora` scores AUC exactly 0.5000 with KS 0.0000, and all 64 rows receive `score: 0.0`. It learned the output format and not the ordering, which is what 566 rows with 18 positives admits as the minimum-loss solution. Full record: [09 LoRA evaluation](docs/09-lora-evaluation.md).
+- **The text track's own number is a constant, not a weak model.** In-distribution, `text_only_lora` scores AUC exactly 0.5000 with KS 0.0000, and all 64 rows receive `score: 0.0`. It learned the output format and not the ordering, which is what 566 rows with 18 positives admits as the minimum-loss solution. **Neither is the zero-shot arm usable, and for the opposite reason.** Asked the same prompt without the adapter (`--mode both`), the base model produces complete, key-complete JSON that fails the schema: 4 of 64 rows parse, and the 9 positives are all among the dropped. `SYSTEM_PROMPT` enumerates the legal values of `label` and `severity` but never those of `source_type`, so the model guesses from the only taxonomy it can see — the block names `FILING_EXCERPTS` / `NEWS` / `STRUCTURED_SIGNALS`. The adapter is immune because it memorised the vocabulary from thousands of labelled examples, which is to say the measurable advantage of fine-tuning on this sample is **format compliance, not judgement**. The direct consequence: `lora − zero_shot` is not measurable — the pairing collapses to 4 single-class rows. Full record: [09 LoRA evaluation](docs/09-lora-evaluation.md).
 - **SEC filing bodies are ingested and the evaluation has been re-run on the new panel.** During the first Stage 2 run, `www.sec.gov/Archives` returned 403 ("Undeclared Automated Tool") to every User-Agent from this network. The real cause turned out to be not the UA's shape but the domain of the contact e-mail inside it: plain domains like `research@shingan.dev` got 200, while `a@github.com`, browser UAs and `curl/8.4.0` all got 403. The downloader `scripts/fetch_sec_docs.py` (3-way concurrency, disk cache, resume, atomic writes) then retrieved all 2,222 bodies (0 failures, ~10 GB, 56 minutes). **This matters for reading history**: the numbers in `artifacts/stage2/` were produced when all seven filing-derived features were empty — the run's own caveat listed 15 dropped features including every one of them. The panel now drops 8, so `structured` 0.7686 → 0.6294 is the text layer arriving, not a regression. Availability will change again; any fetcher must carry a disk cache and resume.
 - **74% of the real positives sit in the gap between the split blocks.** The panel holds 39 observable `tail_risk` positives, but only 10 are reachable: train 4, valid 1, test 5. All 124 observable 2020 rows (27 positives) are `excluded`, because `valid` ends 2019-12-31 and `test` starts 2021-01-01 — the one year these 34 names actually had a systematic drawdown falls between them. Another 2 positives sit in the purge margin. The walk-forward configuration does cover 2020, so this is a split-geometry choice rather than a property of the data.
 - **`default_risk` and `fraud_risk` are not implemented.** Their real event sources (rating history, enforcement actions) are not connected; real evaluation covers `tail_risk` only. The news source is unwired, so every `n_news_*` / `sent_*` column is empty.

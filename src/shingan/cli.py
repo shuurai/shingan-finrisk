@@ -26,7 +26,7 @@ import sys
 from dataclasses import replace
 from importlib import metadata as importlib_metadata
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, NoReturn
 
 import typer
 from rich.console import Console
@@ -285,8 +285,13 @@ def _print_label_summaries(result: Any) -> None:
         console.print()
 
 
-def _fail(message: str, *, hint: str | None = None) -> None:
-    """Print a failure and exit non-zero."""
+def _fail(message: str, *, hint: str | None = None) -> NoReturn:
+    """Print a failure and exit non-zero.
+
+    ``NoReturn`` rather than ``None`` because the function always raises: a caller that
+    validates an argument with ``_fail`` and then uses the validated value is correct
+    code, and the annotation is what says so.
+    """
     error_console.print(f"error: {message}")
     if hint:
         console.print(Panel(hint, title="how to fix", border_style="yellow"))
@@ -945,8 +950,30 @@ def eval_run(
 @eval_app.command("lora")
 def eval_lora(
     adapter: Annotated[
-        Path, typer.Option("--adapter", help="Adapter directory written by `train lora`.")
+        Path,
+        typer.Option(
+            "--adapter",
+            help="Adapter directory written by `train lora`. Also supplies the base model "
+            "and the tokenizer for a zero_shot run.",
+        ),
     ] = Path("artifacts/lora/adapter"),
+    mode: Annotated[
+        str,
+        typer.Option(
+            "--mode",
+            help="adapter, zero_shot, or both. `both` scores the base model and the "
+            "adapter on one prompt set in one process, which is what makes the "
+            "fine-tuning increment a paired measurement rather than two runs.",
+        ),
+    ] = "adapter",
+    base_model: Annotated[
+        str | None,
+        typer.Option(
+            "--base-model",
+            help="Base model for a zero_shot run with no adapter directory. Refused if it "
+            "disagrees with the adapter's own base model.",
+        ),
+    ] = None,
     config: ConfigOpt = None,
     data_config: DataConfigOpt = None,
     eval_config: EvalConfigOpt = None,
@@ -966,7 +993,9 @@ def eval_lora(
         bool,
         typer.Option(
             "--verify-prompts/--no-verify-prompts",
-            help="Refuse to score unless the rebuilt prompts match the SFT file byte for byte.",
+            help="Refuse to score the adapter unless the rebuilt prompts match the SFT "
+            "file byte for byte. Reported but not enforced for a zero_shot-only run, "
+            "which scores no adapter and therefore licenses nothing against that file.",
         ),
     ] = True,
     dry_run: Annotated[
@@ -974,13 +1003,13 @@ def eval_lora(
     ] = False,
     verbose: VerboseOpt = False,
 ) -> None:
-    """Score the fine-tuned text track on one label and split, and write the artifact.
+    """Score the text track on one label and split, and write the artifact.
 
     This is the command that answers the project's central question. Until it existed,
     ``eval run`` fitted structured / TF-IDF / fusion and stopped, so no artifact in the
     repository had ever scored the model the project exists to train.
 
-    Three properties are enforced rather than documented:
+    Four properties are enforced rather than documented:
 
     * **The prompts are the ones the adapter trained on.** They are rebuilt through the
       same functions the data builder uses, then compared byte for byte against the SFT
@@ -989,11 +1018,15 @@ def eval_lora(
       every metric: it looks like a weak model.
     * **Unparsed generations are disclosed, not filled in.** A row whose output has no
       score is dropped, and the drop count and the number of dropped **positives** are
-      written next to the metrics. Filling a zero would assert the model called it
-      negative.
+      written per arm next to the metrics. Filling a zero would assert the model called
+      it negative.
     * **The row says what it is.** The prompt includes a twelve-column structured-signal
       block, so ``text_only_lora`` is prompt-conditioned, not text-only, and is compared
       against a matched baseline rather than against the full feature set.
+    * **The arms share everything but the adapter.** With ``--mode both`` the base arm is
+      generated first from the same in-memory weights, with the same tokenizer and the
+      same prompt set, and the adapter is attached afterwards. Two commands writing two
+      artifacts would produce two numbers whose difference is not a measurement.
     """
     _configure_logging(verbose)
     project, paths = _load_stack(
@@ -1010,13 +1043,23 @@ def eval_lora(
     from shingan.eval.lora import (
         PATH_LORA,
         PromptIntegrity,
+        arms_for_mode,
         build_payload,
         compare_prompts,
+        difference_plan,
         paired_differences,
         score_from_attempts,
         write_artifact,
     )
     from shingan.models.lora import iter_jsonl
+    from shingan.models.lora_inference import (
+        MissingInferenceDependencies,
+        attach_adapter,
+        describe_model,
+        generate_texts,
+        load_for_inference,
+        score_generation,
+    )
     from shingan.pipeline import (
         PATH_FUSED,
         PATH_MATCHED,
@@ -1031,8 +1074,39 @@ def eval_lora(
     )
     from shingan.prompts import build_chat_messages, build_user_prompt
 
+    try:
+        arms = arms_for_mode(mode)
+    except ValueError as exc:
+        _fail(str(exc))
+
     if split not in {"train", "valid", "test"}:
         _fail(f"unknown split {split!r}", hint="choose one of: train, valid, test")
+
+    uses_adapter = PATH_LORA in arms
+    # A zero_shot run only needs the adapter directory to inherit its base weights and
+    # tokenizer; naming the base model instead is enough on a machine without one.
+    adapter_dir: Path | None = adapter
+    if not uses_adapter and base_model is not None:
+        adapter_dir = None
+    try:
+        identity = describe_model(
+            mode=mode,
+            adapter_dir=adapter_dir,
+            base_model=base_model or (None if adapter_dir is not None else project.lora.base_model),
+            load_in_4bit=project.lora.load_in_4bit,
+            compute_dtype=project.lora.bnb_4bit_compute_dtype,
+        )
+    except FileNotFoundError as exc:
+        _fail(
+            str(exc),
+            hint=(
+                "a run needs weights to load. Pass --base-model, or point --adapter at a "
+                "directory written by `train lora` so the arm inherits the same base "
+                "weights and tokenizer as the adapter arm."
+            ),
+        )
+    except ValueError as exc:
+        _fail(str(exc))
 
     build = build_panel(project, write=False)
     panel = build.panel
@@ -1065,23 +1139,35 @@ def eval_lora(
             if candidate.is_file():
                 records.extend(iter_jsonl(candidate))
         if not records:
-            _fail(
-                "there is no SFT file to check the prompts against",
-                hint="Run `shingan data sft` first, or pass --no-verify-prompts to score "
-                "without the check (the resulting numbers would not be reproducible).",
+            if uses_adapter:
+                _fail(
+                    "there is no SFT file to check the prompts against",
+                    hint="Run `shingan data sft` first, or pass --no-verify-prompts to score "
+                    "without the check (the resulting numbers would not be reproducible).",
+                )
+            console.print(
+                "[yellow]no SFT file to compare against, so the prompt check is reported "
+                "as unchecked[/yellow]"
             )
-        integrity = compare_prompts(records, prompts_by_row)
-        if not integrity.ok:
-            _fail(
-                "the rebuilt prompts do not reproduce the SFT file: "
-                f"{integrity.n_matching}/{integrity.n_compared} matched, "
-                f"{integrity.n_rebuilt_missing} rows had no rebuilt prompt",
-                hint=(
-                    "Scoring would measure the model on inputs it was not trained on. "
-                    "Rebuild the SFT file (`shingan data sft`) with the same --data-config, "
-                    f"or inspect the mismatch: {json.dumps(integrity.examples[:2], default=str)}"
-                ),
-            )
+        else:
+            integrity = compare_prompts(records, prompts_by_row)
+            if not integrity.ok and uses_adapter:
+                detail = (
+                    f"the instruction contract changed after the SFT file was written "
+                    f"({integrity.n_system_mismatch} of {integrity.n_system_checked} system "
+                    f"turns differ from the current SYSTEM_PROMPT)"
+                    if integrity.n_system_mismatch
+                    else f"{integrity.n_matching}/{integrity.n_compared} user turns matched, "
+                    f"{integrity.n_rebuilt_missing} rows had no rebuilt prompt"
+                )
+                _fail(
+                    f"the rebuilt prompts do not reproduce the SFT file: {detail}",
+                    hint=(
+                        "Scoring would measure the model on inputs it was not trained on. "
+                        "Rebuild the SFT file (`shingan data sft`) with the same --data-config, "
+                        f"or inspect the mismatch: {json.dumps(integrity.examples[:2], default=str)}"
+                    ),
+                )
 
     positions = list(target.index)
     truth = [int(value) for value in target[f"label_{label}"].to_numpy()]
@@ -1093,11 +1179,18 @@ def eval_lora(
         f"{split} block: {len(target)} observable rows for {label}, "
         f"{int(sum(truth))} positive(s) in the scored subset ({len(positions)} rows)"
     )
+    console.print(
+        f"mode {identity.mode}: scoring {', '.join(arms)} on base {identity.base_model} "
+        f"(tokenizer from {identity.tokenizer_source})"
+    )
     if integrity is not None:
+        verdict = "" if uses_adapter else "  [not a gate: no adapter arm is scored]"
         console.print(
-            f"prompt check: {integrity.n_matching}/{integrity.n_compared} rows for {label} "
-            f"rebuilt byte-identically to the SFT file "
-            f"({integrity.n_scanned} records scanned, {integrity.n_other_label} for other labels)"
+            f"prompt check: {integrity.n_matching}/{integrity.n_compared} user turns for "
+            f"{label} rebuilt byte-identically to the SFT file "
+            f"({integrity.n_scanned} records scanned, {integrity.n_other_label} for other "
+            f"labels); system turn: {integrity.n_system_checked - integrity.n_system_mismatch}"
+            f"/{integrity.n_system_checked} identical to the current SYSTEM_PROMPT{verdict}"
         )
 
     if dry_run:
@@ -1109,16 +1202,9 @@ def eval_lora(
         )
         return
 
-    from shingan.models.lora_inference import (
-        MissingInferenceDependencies,
-        generate_texts,
-        load_for_inference,
-        score_generation,
-    )
-
     try:
-        model, tokenizer, facts = load_for_inference(
-            adapter,
+        model, tokenizer = load_for_inference(
+            identity,
             device_map="auto" if project.lora.device_map == "auto" else "none",
             attn_implementation=project.lora.attn_implementation,
             load_in_4bit=project.lora.load_in_4bit,
@@ -1127,49 +1213,64 @@ def eval_lora(
     except MissingInferenceDependencies as exc:
         _fail(str(exc))
 
-    outputs = generate_texts(
-        model,
-        tokenizer,
-        conversations,
-        max_new_tokens=max_new_tokens,
-        batch_size=batch_size,
-        temperature=temperature,
-        progress=verbose,
-    )
+    # One prompt set, one tokenizer, one model object: the arms are generated in the order
+    # `arms_for_mode` fixes, and the adapter is attached at the single point where the
+    # adapter arm begins. Attaching earlier would change the base arm as well.
     horizon = int(project.labels.horizon_days(label))
-    attempts = [
-        score_generation(text, expected_label=label, expected_horizon_days=horizon)
-        for text in outputs
-    ]
-    scored = score_from_attempts(
-        truth,
-        [attempt.score for attempt in attempts],
-        [attempt.reason for attempt in attempts],
-        label=label,
-        path=PATH_LORA,
-        split=split,
-    )
+    outputs_by_arm: dict[str, list[str]] = {}
+    attempts_by_arm: dict[str, list[Any]] = {}
+    scored: dict[str, Any] = {}
+    for arm in arms:
+        if arm == PATH_LORA:
+            model = attach_adapter(model, identity)
+            console.print(f"attached adapter for {arm}")
+        outputs = generate_texts(
+            model,
+            tokenizer,
+            conversations,
+            max_new_tokens=max_new_tokens,
+            batch_size=batch_size,
+            temperature=temperature,
+            progress=verbose,
+        )
+        attempts = [
+            score_generation(text, expected_label=label, expected_horizon_days=horizon)
+            for text in outputs
+        ]
+        outputs_by_arm[arm] = outputs
+        attempts_by_arm[arm] = attempts
+        scored[arm] = score_from_attempts(
+            truth,
+            [attempt.score for attempt in attempts],
+            [attempt.reason for attempt in attempts],
+            label=label,
+            path=arm,
+            split=split,
+        )
 
     # Per-row predictions, so the aggregate metrics in the artifact can be recomputed
-    # rather than believed. The raw generation is capped: 492 rows of verbose output
-    # would otherwise dominate the file, and the cap is recorded per row.
+    # rather than believed. The raw generation is capped: 492 rows of verbose output per
+    # arm would otherwise dominate the file, and the cap is recorded per row.
     raw_cap = 4000
-    predictions = [
-        {
-            "ticker": str(panel["ticker"].iloc[position]),
-            "as_of": str(panel["as_of"].iloc[position]),
-            "label": label,
-            "y_true": int(outcome_value),
-            "score": attempt.score,
-            "parsed": attempt.parsed,
-            "reason": attempt.reason,
-            "raw": text[:raw_cap],
-            "raw_truncated": len(text) > raw_cap,
-        }
-        for position, outcome_value, attempt, text in zip(
-            positions, truth, attempts, outputs, strict=True
-        )
-    ]
+    predictions = {
+        arm: [
+            {
+                "ticker": str(panel["ticker"].iloc[position]),
+                "as_of": str(panel["as_of"].iloc[position]),
+                "label": label,
+                "y_true": int(outcome_value),
+                "score": attempt.score,
+                "parsed": attempt.parsed,
+                "reason": attempt.reason,
+                "raw": text[:raw_cap],
+                "raw_truncated": len(text) > raw_cap,
+            }
+            for position, outcome_value, attempt, text in zip(
+                positions, truth, attempts_by_arm[arm], outputs_by_arm[arm], strict=True
+            )
+        ]
+        for arm in arms
+    }
 
     rows: list[dict[str, Any]] = []
     differences: list[dict[str, Any]] = []
@@ -1198,7 +1299,7 @@ def eval_lora(
                     f"{outcome.matched_reason or 'not fitted'}"
                 )
             # Reading order, and the matched baseline sits second on purpose: it is the
-            # row the LoRA row is subtracted from, so it has to be adjacent to it.
+            # row the text arms are subtracted from, so it has to be adjacent to them.
             for report in (
                 outcome.reports[PATH_STRUCTURED],
                 matched_report,
@@ -1208,19 +1309,22 @@ def eval_lora(
                 if report is not None:
                     rows.append(report.as_dict())
 
-            # Every arm on the same rows. The LoRA column is NaN wherever a generation
+            # Every arm on the same rows. An arm's column is NaN wherever its generation
             # failed to parse, and `paired_differences` drops those rows for all arms
-            # rather than comparing one arm on a subset of the other's rows.
-            arms: dict[str, Any] = {
+            # rather than comparing one arm on a subset of another's rows.
+            arms_frame: dict[str, Any] = {
                 "as_of": target["as_of"],
                 "y_true": target[f"label_{label}"].astype(int),
                 PATH_STRUCTURED: outcome.scores[PATH_STRUCTURED],
                 PATH_TEXT: outcome.scores[PATH_TEXT],
                 PATH_FUSED: outcome.scores[PATH_FUSED],
-                PATH_LORA: pd.Series(
-                    [attempt.score for attempt in attempts], index=positions, dtype="float64"
-                ),
             }
+            for arm in arms:
+                arms_frame[arm] = pd.Series(
+                    [attempt.score for attempt in attempts_by_arm[arm]],
+                    index=positions,
+                    dtype="float64",
+                )
             # The text and structured baselines are always there. The matched control is
             # listed first when it exists, because that is the subtraction that means
             # "the text contribution" and the reading order should not bury it — and it is
@@ -1228,17 +1332,21 @@ def eval_lora(
             # all-NaN arm would be reported as "not measured" beside two real ones.
             baselines: list[str] = [PATH_TEXT, PATH_STRUCTURED]
             if PATH_MATCHED in outcome.scores:
-                arms[PATH_MATCHED] = outcome.scores[PATH_MATCHED]
+                arms_frame[PATH_MATCHED] = outcome.scores[PATH_MATCHED]
                 baselines.insert(0, PATH_MATCHED)
-            differences = paired_differences(
-                pd.DataFrame(arms),
-                candidate=PATH_LORA,
-                baselines=tuple(baselines),
-                n_boot=project.eval.rolling.bootstrap_samples,
-                block_days=project.labels.calendar_horizon_days(label),
-                alpha=1.0 - project.eval.rolling.confidence_level,
-                seed=project.project.seed,
-            )
+            frame = pd.DataFrame(arms_frame)
+            for group in difference_plan(arms, tuple(baselines)):
+                differences.extend(
+                    paired_differences(
+                        frame,
+                        candidate=group["candidate"],
+                        baselines=group["baselines"],
+                        n_boot=project.eval.rolling.bootstrap_samples,
+                        block_days=project.labels.calendar_horizon_days(label),
+                        alpha=1.0 - project.eval.rolling.confidence_level,
+                        seed=project.project.seed,
+                    )
+                )
         else:
             caveats.append(f"the baseline rows were not fitted: {outcome.reason}")
     else:
@@ -1247,7 +1355,8 @@ def eval_lora(
             "whole test block and mixing them with a prefix of it would compare different "
             "row sets."
         )
-    rows.append(scored.as_dict())
+    for arm in arms:
+        rows.append(scored[arm].as_dict())
 
     data_info = {
         "sources": [str(source) for source in project.data.sources],
@@ -1264,7 +1373,8 @@ def eval_lora(
         split=split,
         rows=rows,
         scored=scored,
-        adapter=facts.as_dict(),
+        arms=arms,
+        model=identity.as_dict(),
         generation={
             "policy": "greedy" if temperature <= 0 else "sampled",
             "temperature": temperature,
@@ -1273,6 +1383,10 @@ def eval_lora(
         },
         prompt={
             "integrity": integrity.as_dict() if integrity is not None else {"checked": False},
+            # The check licenses the adapter row. In a zero_shot-only run there is no
+            # adapter row, and enforcing a file-level check for it would refuse a
+            # legitimate run on a machine that never trained anything.
+            "integrity_enforced": uses_adapter,
             "includes_structured_signals": True,
             "structured_signals": list(PROMPT_SIGNAL_COLUMNS),
             "chars_budget": budget,
@@ -1293,13 +1407,20 @@ def eval_lora(
     written = write_artifact(payload, destination)
 
     table = Table(title=f"{label} / {split}", title_justify="left")
-    for column in ("path", "AUC", "KS", "PR-AUC", "positives", "n rows"):
-        table.add_column(column, justify="right" if column != "path" else "left")
+    # The path column must never be ellipsized. With one arm there was nothing to confuse
+    # it with; with two, the row names are the only thing telling them apart, and a table
+    # where both rows read `text_o…` is a table that cannot be read. Everything else may
+    # wrap — `not measur…` is still unambiguous, and the artifact carries the exact values.
+    table.add_column("path", no_wrap=True)
+    for column in ("role", "AUC", "KS", "dir", "PR-AUC", "pos", "n"):
+        table.add_column(column, justify="right")
     for row in rows:
         table.add_row(
             str(row.get("path")),
+            "arm" if row.get("path") in arms else "baseline",
             _metric(row.get("auc")),
             _metric(row.get("ks")),
+            str(row.get("ks_direction") or "?"),
             _metric(row.get("pr_auc")),
             str(row.get("n_positives", "?")),
             str(row.get("n_rows", "?")),
@@ -1316,12 +1437,14 @@ def eval_lora(
                 f", crosses zero: {item['crosses_zero']}"
                 + (f"  ({item['note']})" if item.get("note") else "")
             )
-    console.print(
-        f"  parse: {scored.n_parsed}/{scored.n_attempted} usable "
-        f"(failure rate {scored.failure_rate:.4f}), dropped positives {scored.n_dropped_positives}"
-    )
-    if scored.n_dropped:
-        console.print(f"  [yellow]reasons:[/yellow] {scored.failure_reasons}")
+    for arm in arms:
+        run = scored[arm]
+        console.print(
+            f"  parse ({arm}): {run.n_parsed}/{run.n_attempted} usable "
+            f"(failure rate {run.failure_rate:.4f}), dropped positives {run.n_dropped_positives}"
+        )
+        if run.n_dropped:
+            console.print(f"    [yellow]reasons:[/yellow] {run.failure_reasons}")
     for name, path in written.items():
         console.print(f"wrote {name}: {path}")
 

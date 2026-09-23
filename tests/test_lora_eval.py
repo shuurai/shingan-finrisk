@@ -48,6 +48,7 @@ from shingan.models.lora_inference import (
     missing_inference_modules,
     score_generation,
 )
+from shingan.prompts import SYSTEM_PROMPT
 
 HORIZON = 30
 
@@ -75,7 +76,7 @@ def payload_for(
 def sft_record(sample_id: str, label: str, content: str) -> dict:
     return {
         "messages": [
-            {"role": "system", "content": "system"},
+            {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": content},
         ],
         "meta": {"sample_id": sample_id, "label": label},
@@ -292,7 +293,67 @@ def test_the_verdict_is_exposed_as_a_plain_bool() -> None:
     assert isinstance(integrity.as_dict()["ok"], bool)
 
 
+def test_an_edited_instruction_contract_is_caught() -> None:
+    """The system turn was not compared at all until this check existed.
+
+    Every example in an SFT file carries the same system turn, so editing `SYSTEM_PROMPT`
+    between training and scoring changes what the adapter is shown without changing any
+    user turn — the row-by-row comparison stays byte-identical and reports success. This
+    is not hypothetical: the reason to edit it is a defect the base model exposed
+    (`source_type` is not enumerated, see docs/09 section 12.6), and the person fixing it
+    would otherwise rescore the adapter on a contract it never trained under.
+    """
+    record = sft_record("A", "tail_risk", "p")
+    record["messages"][0]["content"] = "an older instruction contract"
+
+    integrity = compare_prompts([record], {("A", "tail_risk"): "p"})
+
+    assert integrity.n_system_checked == 1
+    assert integrity.n_system_mismatch == 1
+    assert integrity.system_example is not None
+    assert integrity.system_example["first_difference"]["offset"] == 0
+    assert not integrity.ok
+    # The user turn still matched: this failure is invisible without the system check.
+    assert integrity.n_matching == integrity.n_compared
+
+
 # -- the artifact ---------------------------------------------------------------
+
+
+def sample_payload(**overrides: object) -> dict:
+    """``build_payload`` with the uneventful arguments filled in.
+
+    Three of its arguments became plural when the zero-shot arm arrived, and the artifact
+    tests all need a payload. Spelling the same eight lines out in each of them is how one
+    of them ends up not exercising what its name claims.
+    """
+    run = score_from_attempts([0, 1], [0.2, 0.8], ["", ""], label="tail_risk")
+    defaults: dict[str, object] = {
+        "label": "tail_risk",
+        "split": "test",
+        "rows": [run.as_dict()],
+        "scored": {PATH_LORA: run},
+        "arms": [PATH_LORA],
+        "model": {
+            "mode": "adapter",
+            "base_model": "Qwen/Qwen3-14B",
+            "base_model_source": "adapter directory (artifacts/lora/adapter)",
+            "tokenizer_source": "adapter directory",
+            "tokenizer_path": "artifacts/lora/adapter",
+            "quantization": "4-bit nf4 double-quantised, bfloat16 compute",
+            "adapter": {
+                "weights_file": "adapter_model.safetensors",
+                "weights_sha256": "ab" * 32,
+                "weights_bytes": 17,
+                "rank": 32,
+            },
+        },
+        "generation": {"policy": "greedy"},
+        "prompt": {"integrity": {}},
+        "data": {"is_synthetic": True},
+    }
+    defaults.update(overrides)
+    return build_payload(**defaults)  # type: ignore[arg-type]
 
 
 def test_non_finite_metrics_become_null_rather_than_nan() -> None:
@@ -308,18 +369,10 @@ def test_non_finite_metrics_become_null_rather_than_nan() -> None:
 
 def test_written_artifact_parses_strictly(tmp_path: Path) -> None:
     run = score_from_attempts([0, 1], [None, None], ["rejected", "rejected"], label="x")
-    payload = build_payload(
-        label="tail_risk",
-        split="test",
-        rows=[run.as_dict()],
-        scored=run,
-        adapter={"base_model": "Qwen/Qwen3-14B"},
-        generation={"policy": "greedy"},
-        prompt={"integrity": {}},
-        data={"is_synthetic": True},
-    )
 
-    written = write_artifact(payload, tmp_path)
+    written = write_artifact(
+        sample_payload(rows=[run.as_dict()], scored={PATH_LORA: run}), tmp_path
+    )
     text = written["lora_eval_json"].read_text(encoding="utf-8")
 
     assert "NaN" not in text
@@ -329,20 +382,7 @@ def test_written_artifact_parses_strictly(tmp_path: Path) -> None:
 
 def test_the_payload_carries_the_disclosure_that_makes_the_row_readable() -> None:
     """The row is named ``text_only_lora`` and is not text-only. The payload must say so."""
-    run = score_from_attempts(
-        [0, 1, 1, 0], [0.1, 0.9, 0.8, 0.2], ["", "", "", ""], label="tail_risk"
-    )
-
-    payload = build_payload(
-        label="tail_risk",
-        split="test",
-        rows=[run.as_dict()],
-        scored=run,
-        adapter={},
-        generation={},
-        prompt={"includes_structured_signals": True},
-        data={"is_synthetic": True},
-    )
+    payload = sample_payload(prompt={"includes_structured_signals": True})
 
     assert PROMPT_DISCLOSURE in payload["caveats"]
     assert any("synthetic" in caveat for caveat in payload["caveats"])
@@ -352,57 +392,32 @@ def test_the_payload_carries_the_disclosure_that_makes_the_row_readable() -> Non
 def test_a_dropped_positive_is_disclosed_in_the_caveats() -> None:
     run = score_from_attempts([1, 1], [None, 0.4], ["rejected", ""], label="tail_risk")
 
-    payload = build_payload(
-        label="tail_risk",
-        split="test",
-        rows=[run.as_dict()],
-        scored=run,
-        adapter={},
-        generation={},
-        prompt={},
-        data={"is_synthetic": False},
+    payload = sample_payload(
+        rows=[run.as_dict()], scored={PATH_LORA: run}, data={"is_synthetic": False}
     )
 
     assert run.n_dropped_positives == 1
     assert any("did not parse" in caveat for caveat in payload["caveats"])
+    assert any(PATH_LORA in caveat for caveat in payload["caveats"]), (
+        "with more than one arm possible, a drop count that does not name its arm is a "
+        "number the reader has to guess at"
+    )
 
 
 def test_predictions_are_included_so_the_metrics_can_be_recomputed() -> None:
-    run = score_from_attempts([0, 1], [0.2, 0.8], ["", ""], label="tail_risk")
     predictions = [
         {"ticker": "AAA", "as_of": "2020-01-01", "y_true": 0, "score": 0.2},
         {"ticker": "AAA", "as_of": "2020-04-01", "y_true": 1, "score": 0.8},
     ]
 
-    payload = build_payload(
-        label="tail_risk",
-        split="test",
-        rows=[run.as_dict()],
-        scored=run,
-        adapter={},
-        generation={},
-        prompt={},
-        data={},
-        predictions=predictions,
-    )
+    payload = sample_payload(predictions={PATH_LORA: predictions})
 
-    assert payload["predictions"] == predictions
+    assert payload["predictions"][PATH_LORA] == predictions
 
 
 def test_the_markdown_says_not_measured_rather_than_printing_nan() -> None:
     run = score_from_attempts([0, 1], [None, None], ["rejected", "rejected"], label="x")
-    payload = build_payload(
-        label="tail_risk",
-        split="test",
-        rows=[run.as_dict()],
-        scored=run,
-        adapter={},
-        generation={},
-        prompt={"integrity": {}},
-        data={},
-    )
-
-    markdown = render_markdown(payload)
+    markdown = render_markdown(sample_payload(rows=[run.as_dict()], scored={PATH_LORA: run}))
 
     assert "not measured" in markdown
     assert "nan" not in markdown.lower()
@@ -560,6 +575,29 @@ def test_rows_missing_a_score_are_dropped_for_every_arm() -> None:
     )
 
     assert all(item["n_rows"] == 54 for item in records)
+
+
+def test_the_row_set_of_a_comparison_is_stated_not_just_counted() -> None:
+    """``n_rows`` alone does not say *why* the rows are missing.
+
+    Rows leave a comparison because some arm failed to parse there, and that is not a
+    random subset — a run whose surviving rows are all negatives is exactly the case the
+    parse accounting exists for. The count is in ``n_rows``; the reason has to be in words.
+    """
+    frame = comparison_frame()
+    frame.loc[0:5, "text_only_lora"] = float("nan")
+
+    records = paired_differences(
+        frame,
+        candidate="text_only_lora",
+        baselines=("text_baseline",),
+        n_boot=100,
+        block_days=30,
+        alpha=0.05,
+        seed=7,
+    )
+
+    assert all("6 of 60 rows are outside this comparison" in item["note"] for item in records)
 
 
 def test_a_single_class_sample_yields_no_estimate_rather_than_zero() -> None:

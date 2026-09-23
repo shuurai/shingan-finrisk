@@ -432,3 +432,158 @@
 **没有改什么**：**门禁**。`headline_ks` 门本来就单独报 `direction=positives_higher`（`report.py`），判定一直是对的；这次修的是**表格的读法**，不是判定。
 
 
+## 12. Step 7 — 零样本行 `text_only_zero_shot`
+
+本节按第 10.4/10.5 节的建议执行：**不加训练、不扩池子、不需要正样本**，只把基座模型本身变成一个被打分的臂。理由是项目的对外问题有两个，此前只有第一个有产物：
+
+| 问题 | 此前的状态 |
+| --- | --- |
+| 文本轨比 structured 多带了信息吗？ | 有产物（`text_only_lora - structured_matched`），答案是"没有增量" |
+| **微调比不微调多了什么吗？** | **没有产物**。`text_only_zero_shot` 只存在于 `docs/05` 的消融表里 |
+
+### 12.1 先决定的一件事：这个行必须在同一个进程里跑
+
+`text_only_zero_shot` 的价值是**差值**（`lora - zero_shot`），而差值只在同一次生成里才是配对的。两条命令写两份产物，得到的是两个数，不是一次测量。因此 `--mode` 有三个取值：
+
+| mode | 打分的臂 | 用途 |
+| --- | --- | --- |
+| `adapter` | `text_only_lora` | 原来的行为，默认值不变 |
+| `zero_shot` | `text_only_zero_shot` | 基座模型单独一行 |
+| `both` | `text_only_zero_shot` → `text_only_lora` | **两者共享同一份 base 权重、同一个 tokenizer、同一组 prompt** |
+
+`both` 的顺序是承重的：打分只有一个 `model` 对象，适配器是挂在这个对象上的。所以基座臂先跑，适配器在 `text_only_lora` 这个臂开始处挂上去（`attach_adapter`，全流程唯一一处）。`ARMS_BY_MODE` 把适配器臂放在最后，并有测试钉住这个顺序。
+
+### 12.2 三处与口径有关的实现决定
+
+**（1）identity 从"适配器"提升为"模型"。** 原来 `load_for_inference(adapter_dir)` 返回 `AdapterFacts`，那个结构假设"打分的必然是适配器"。零样本没有适配器，所以新增 `ModelIdentity`：`mode` / `base_model` / `base_model_source` / `tokenizer_source` / `tokenizer_path` / `quantization` / `adapter`（可为 `None`）。它是**纯函数** `describe_model()` 算出来的——不 import torch——所以随产物走的这份身份在 CI 上可断言；`load_for_inference(identity)` 只是把它实现出来。
+
+**（2）tokenizer 与"是否带适配器"解耦。** 这一条是零样本行能否成立的关键。适配器目录里存的 tokenizer 与基座自己的**不一致**（训练日志记过 `Updated tokens: {'bos_token_id': None}`）。如果零样本臂用基座自己的 tokenizer，两臂相差的就是"权重 + 分词"两项，差值的解释立刻失效。所以 `ModelIdentity.tokenizer_path` 恒为适配器目录（当它带 tokenizer 时），**即使这一跑不挂适配器**；`adapter` 字段才是 `None`。记录里三层事实分开：权重来自哪里（`base_model_source`）、分词来自哪里（`tokenizer_source`）、有没有挂适配器（`adapter`）。
+
+**（3）不允许多个 base。** `describe_model` 在 `--base-model` 与适配器自报的 `base_model_name_or_path` 不一致时**拒绝**，并把两个名字都印出来。理由：一个两臂跑在不同基座上的产物，看起来和普通产物一模一样，测的却是"两个模型的差别"而不是"适配器的效果"。这是本项目一贯的处理方式——把不可判别的东西拒绝掉，而不是悄悄解决。
+
+### 12.3 冒烟：先量 512，再量 4096
+
+第一次冒烟 `--mode both --limit 2`（默认 `max_new_tokens=512`），58 秒跑完：
+
+| arm | parse | 失败原因 |
+| --- | --- | --- |
+| `text_only_zero_shot` | **0 / 2** | `no JSON object found in model output` ×2 |
+| `text_only_lora` | 2 / 2 | — |
+
+看原始输出，原因一目了然：基座模型把 512 个 token **全部用在思维链里**，一个 `{` 都没出现。原始生成以 `<think>\nOkay, let's tackle this risk assessment...` 开头，长度 1993 / 2013 字符，正好撞在 512 token 的上限。
+
+**这意味着 512 下的"0 / 2"是关于预算的陈述，不是关于能力的陈述。** 于是做了第二件事：把预算提到 4096（= 训练的 `max_seq_length`，不是随手取的数）再量 4 行（`--limit 4`）。结果变了，而且变得更有信息量：
+
+| 预算 | parse | 失败原因 |
+| --- | --- | --- |
+| 512 | 0 / 2 | `no JSON object found`（思维链未结束） |
+| 4096 | **0 / 4** | **全部是同一条** `evidence[0].source_type` 枚举不合法 |
+
+4 行里 4 行都产出了**完整的、键齐全的 JSON 对象**（长度 3348–3938 字符，全部以 `}` 收尾），包含 `score` / `severity` / `reasons` / `evidence` / `catalysts` / `limitations`，也确实引用了文档里的句子。它们失败在**唯一一处**：`source_type` 写成了 XML 块名而不是枚举值。
+
+```json
+{"source_type": "FILING_EXCERPTS", ...}   // 模型写的
+{"source_type": "filing", ...}            // schema 要求的（filing/news/price/structured/other）
+```
+
+**这不是模型的失败，是指令契约的缺口。** `prompts.SYSTEM_PROMPT` 显式枚举了 `label`（三个取值）与 `severity`（四个取值），**但没有枚举 `source_type`**——已核实该常量里不含 `filing` / `news` / `price` / `structured` / `other` 任何一个字。模型于是猜了它唯一见过的分类法：prompt 里那几个 XML 块名。猜得很合理。
+
+**这个缺口在任何指标里都看不见**：模型被解析器拒绝，报告上只多一个失败率，看不出是"不会做"还是"没人告诉它词表"。适配器之所以不受影响，是它在 SFT 里见过 `render_target()` 生成的大量合法 `source_type`，把词表背下来了——也就是**微调在这里买到的是格式合规，而不是判断力**。这句话是不是普适，本节的数据不足以断言；但它至少是这份样本上的事实。
+
+**不要为了让这一行好看而放宽解析器。** `parse_assessment` 会拒绝它是有意为之（`prompts.py` 模块 docstring：伪造的引用比没有答案更糟）。把 `FILING_EXCERPTS` 映射成 `filing` 等于替模型改作业，会把零样本这一行的数字抬高，同时让"微调买到了什么"这个差值失去意义。
+
+### 12.4 合成 test 上的完整两臂结果
+
+命令：`shingan eval lora --mode both --max-new-tokens 4096`（64 行 test 块、9 个正样本、greedy）。产物：`artifacts/lora-eval/20260923T081607Z.{json,md}`，用时 14m08s。
+
+| path | role | AUC | KS | ks_dir | PR-AUC | positives | n rows |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `structured` | baseline | 0.5434 | 0.2323 | `negatives_higher` | 0.1670 | 9 | 64 |
+| `structured_matched` | baseline | 0.5091 | 0.2727 | `negatives_higher` | 0.1492 | 9 | 64 |
+| `text_baseline` | baseline | 0.4424 | 0.3374 | `negatives_higher` | 0.2956 | 9 | 64 |
+| `fused` | baseline | 0.4525 | 0.3152 | `negatives_higher` | 0.1538 | 9 | 64 |
+| `text_only_zero_shot` | **arm** | **not measured** | not measured | `undefined` | not measured | **0** | **4** |
+| `text_only_lora` | **arm** | **0.5000** | **0.0000** | `tied` | 0.1406 | 9 | 64 |
+
+解析账目：
+
+| arm | 可用 / 尝试 | 失败率 | 被丢弃的正样本 | 原因分布 |
+| --- | --- | --- | --- | --- |
+| `text_only_zero_shot` | **4 / 64** | **0.9375** | **9（全部）** | `source_type` 枚举不合法 ×60 |
+| `text_only_lora` | 64 / 64 | 0.0000 | 0 | — |
+
+**三条必须与数字同时出现的事实**：
+
+**（1）零样本臂剩下的那 4 行全是负样本。** `y_true` 是 `[0, 0, 0, 0]`，块里 9 个正样本**一个不剩**（`n_dropped_positives: 9`）。所以这一行不是"测出来没有排序能力"，而是**根本没测到**——AUC / PR-AUC 无从计算。`ScoredRun` 把 `n_dropped_positives` 单列出来正是为了这一刻：解析失败不是随机抽样，一个高失败率的臂剩下什么，决定了它的数字能不能看。
+
+**（2）适配器臂在 4096 下与 Step 4 在 512 下逐行完全相同。** 用产物独立核对：64 行的 `(ticker, as_of, score, parsed)` 四元组**完全一致**，且 64 行全部 `score = 0.0`。这是本次换预算的**对照**——512 → 4096 对适配器臂没有任何影响（greedy + EOS 提前终止），所以两臂共享的大预算不是新混入的变量。它也第三次确认了第 6 节的结论：适配器输出是常量。
+
+**（3）这一行今天不能被引用。** 它既不是"零样本没用"，也不是"零样本有用"。64 行里能进入指标的只有 4 行、且全为负类。可用的真实信息只有一条：**基座模型在这份 prompt 上产出的 JSON 通不过 schema**，以及它为什么通不过（下一节）。
+
+### 12.5 这一步没有验证什么
+
+- **真实数据上的零样本行：没有跑。** 见 12.6 的三个选项。合成数据上它的失败原因是 prompt 契约缺口，而这个缺口在真实数据上**一模一样存在**（同一个 `SYSTEM_PROMPT`）。这是**推断，不是测量**，按本仓口径不能写成结果。
+- **"微调买到的只是格式合规"不是普适结论。** 本次只量了 64 行、9 个正样本，零样本臂又只剩 4 行。它能支持的说法只有："在这份样本上，适配器唯一可测量的优势是通过了 schema"。
+- **预算敏感性只在 4 行上量过**（512 → 0/2 可用且失败原因是"没有 JSON"；4096 → 0/4 可用且失败原因变成"枚举不合法"）。64 行上只跑了 4096；512 下的完整数字是 Step 4 的适配器臂，零样本臂没有。
+- **两臂之间的配对差值不可测。** 零样本臂只有 4 行有分数，而 `paired_differences` 要求两臂在同一行上都有分数，所以 `lora - zero_shot` 落在那 4 行上、且那 4 行只有一类 → 区间无法形成。这与第（1）条是同一件事的两个说法。
+
+### 12.6 一个需要你决定的缺陷：指令契约没有枚举 `source_type`
+
+**事实**：`prompts.SYSTEM_PROMPT` 列了 `label`（三个取值）与 `severity`（四个取值），**没有列 `source_type`**。已核实该常量正文里不含 `filing` / `news` / `price` / `structured` / `other` 任何一个词。模型于是按 prompt 里唯一可见的分类法去填——`<STRUCTURED_SIGNALS>` / `<FILING_EXCERPTS>` / `<NEWS>` 这些块名，其中一行写成小写 `filing_excerpts`。
+
+**为什么此前没人发现**：这个缺口在**任何指标里都不可见**。模型被解析器拒绝，报告上只多一个失败率；而失败率高天然可以解释成"模型弱"。适配器把这个缺口盖住了——它在 SFT 里见过 `render_target()` 生成的成千上万个合法 `source_type`，把词表背了下来。
+
+**为什么不能顺手改掉**：改 `SYSTEM_PROMPT` 会改变**每一条** prompt，而 `eval lora` 的 `--verify-prompts` 门禁是靠"重建的 prompt 与 SFT 文件逐字节一致"来授权打分的。改了之后旧 SFT 文件不再匹配，**必须重新生成语料并重训**才能再给适配器打分。
+
+**顺带发现并修掉的门禁缺口**：`--verify-prompts` 此前**只比对 user 轮**（`_sft_user_turn` 只取 `role == "user"`），system 轮根本没进比对。也就是说"改了 system prompt 却仍然通过门禁"是可能发生的，而且不留痕迹——这正是上面那条要防的事。现在 `PromptIntegrity` 增加 `n_system_checked` / `n_system_mismatch` / `system_example`，`ok` 要求两者都为零。在当前仓库上跑出来是 **782/782 system 轮一致**（`--dry-run` 可复现），所以这是一处**先前没有暴露的覆盖缺口**，不是一次误报。
+
+**三个选项**（都会改变"零样本这一行将来是什么"）：
+
+| 选项 | 代价 | 结果 |
+| --- | --- | --- |
+| **A. 先修契约，再跑真实数据**（建议） | 改一行 prompt + 重新生成 SFT + 重训 42 min + 再评测 | 零样本臂能被公平地量一次；适配器也拿到一个不再依赖"背词表"的契约。这是本轮唯一能把零样本行变成**真数字**的路 |
+| **B. 现在就花 GPU 把真实数据跑出来** | 约 2–3 小时（492 行 × 4096 token，含 prefill） | 一个**几乎必然**是"not measured"的行，但真实数据上的失败分布是实测而非推断 |
+| **C. 先不动，只写进文档** | 0 | 对外口径诚实（"这一行今天不可用"），但缺口留着，下一次重训还会踩 |
+
+**建议 A。** 理由不是省 GPU 而是**顺序**：B 的结果会被 A 推翻一次（修完契约后零样本臂会变），A 的结果不会被 B 推翻。B 唯一不可替代的价值是"真实数据上的实测失败分布"，而它现在属于诊断，不属于交付。
+
+### 12.7 顺带修掉的一处配对缺陷：一个臂的失败不该缩短另一个臂的对比
+
+**发现方式**：`--mode both` 的**第一次**运行（`artifacts/lora-eval/20260923T080005Z`，已由下一步替换）把 `text_only_zero_shot` 和 `structured_matched` / `text_baseline` / `structured` 放在**同一组**基线上交给 `paired_differences`。结果是：Step 4 在 64 行上测出来的 `lora - structured_matched` 等**六项差值全部消失**，变成"not measured / n_rows=4"。
+
+**为什么**：`paired_differences` 会把"任一所列臂缺分数"的行从整组里剔除——这条规则本身是对的（在不同行集上比较两个模型不是比较）。但它同时意味着**零样本臂 93.75% 的解析失败，会把适配器臂对"拟合基线"的对比也砍到 4 行**，而那几项对比根本不涉及零样本臂，本来可以在 64 行上测。
+
+**改了什么**：
+
+| 位置 | 改动 |
+| --- | --- |
+| `difference_plan()` | 把"臂 vs 臂"与"臂 vs 拟合基线"拆成**两组**，而不是合成一张基线清单。单臂模式下产物与改动前完全一致 |
+| `paired_differences()` | 行集缺口写进记录的 `note`（`"60 of 64 rows are outside this comparison because at least one arm has no score there"`），而不只是打一条日志 |
+
+**改后同一次运行的差值表**（`artifacts/lora-eval/20260923T081607Z`）：
+
+| 对比 | 行数 | PR-AUC 估计 | AUC 估计 | 跨零 |
+| --- | --- | --- | --- | --- |
+| `lora − structured_matched` | **64** | −0.0086 | −0.0091 | 是 |
+| `lora − text_baseline` | **64** | −0.1550 | +0.0576 | 是 |
+| `lora − structured` | **64** | −0.0263 | −0.0434 | 是 |
+| `lora − zero_shot` | 4 | not measured | not measured | — |
+| `zero_shot − matched / text / structured` | 4 | not measured | not measured | — |
+
+前三行的估计值与 Step 4 的**逐位相同**（`-0.008617722241709064` 等），这正是应该的：适配器臂的 64 个分数没有变，只是它们重新回到了同一张表里。
+
+**为什么这算缺陷而不算调参**：一个产物因为**与新加的臂无关**的原因而丢掉已有的对比，属于"显示值与事实相互矛盾"。而且丢得很安静——读者看到的是六个 `not measured`，看不出其中三个本来是可测的。
+
+### 12.8 本步改了哪些文件
+
+| 文件 | 改动 |
+| --- | --- |
+| `models/lora_inference.py` | 新增 `MODE_*` / `SCORING_MODES` / `QUANT_TYPE` / `DOUBLE_QUANT`；新增纯函数 `describe_model()` 与数据类 `ModelIdentity`；新增 `attach_adapter()`；`load_for_inference()` 由"接收适配器目录"改为"接收 identity" |
+| `eval/lora.py` | 新增 `PATH_ZERO_SHOT` / `ARMS_BY_MODE` / `arms_for_mode()` / `difference_plan()` / `ZERO_SHOT_DISCLOSURE`；`build_payload()` 三处变复数（`model` 节、`parse` 与 `predictions` 按臂分组）；`render_markdown()` 增加 role 列、KS 方向列、逐臂解析行；`PromptIntegrity` 增加 system 轮比对；`paired_differences()` 把行集缺口写进 `note` |
+| `cli.py` | `eval lora` 新增 `--mode` / `--base-model`；打分循环按臂执行并在唯一一处挂适配器；差值按 `difference_plan()` 分组；对比表 `path` 列 `no_wrap`（两臂下被省略号截断的路径列等于不可读）；`_fail` 标注 `NoReturn` |
+| `tests/test_zero_shot.py` | **新建，30 项**：模式到臂的映射与顺序、分组计划及其理由、identity 解析与拒绝（含"两个 base 不一致"）、在 import peft / torch **之前**拒绝错误调用、零样本产物的三处披露 |
+| `tests/test_lora_eval.py` | +2 项（system 轮比对、行集缺口写进 note）；既有产物测试的夹具改为新签名 |
+
+**产物 schema 变化（需要知道，但不需要迁移）**：`adapter` 节更名为 `model`；`parse` 与 `predictions` 由单值变为按臂的映射。Step 2/4 的产物（`artifacts/lora-eval/20260923T062853Z`、`20260923T080005Z`）用的是旧 schema，它们作为当时的记录保留，不重写。
+
+

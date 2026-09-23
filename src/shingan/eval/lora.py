@@ -45,6 +45,7 @@ from shingan.eval.metrics import (
     paired_bootstrap_difference,
     roc_auc,
 )
+from shingan.prompts import SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,22 @@ logger = logging.getLogger(__name__)
 #: ADR-0003 and the model card template both name it, but it is *not* what the name
 #: claims — see the module docstring and ``PROMPT_DISCLOSURE``.
 PATH_LORA = "text_only_lora"
+
+#: The base model before any fine-tuning, on the same prompt and through the same parser.
+#: docs/05 defines this row as "the increment fine-tuning bought"; a row that does not
+#: exist cannot play that role, and a row measured in a different process cannot either.
+PATH_ZERO_SHOT = "text_only_zero_shot"
+
+#: Which rows each mode scores, in the order they must be *generated*.
+#:
+#: Order is load-bearing, not cosmetic: scores come from one model object, and the
+#: adapter arm attaches its weights to that object. The adapter arm is therefore last in
+#: every tuple here, and :func:`arms_for_mode` is what the caller iterates.
+ARMS_BY_MODE: dict[str, tuple[str, ...]] = {
+    "adapter": (PATH_LORA,),
+    "zero_shot": (PATH_ZERO_SHOT,),
+    "both": (PATH_ZERO_SHOT, PATH_LORA),
+}
 
 #: The baseline the LoRA row is allowed to be subtracted from lives in
 #: :mod:`shingan.pipeline` as ``PATH_MATCHED``, next to the three paths it joins: it is
@@ -67,6 +84,92 @@ PROMPT_DISCLOSURE = (
     "'structured_matched' (the same twelve signals) rather than from 'structured' "
     "(the full feature set)"
 )
+
+#: The disclosure that only a run with a zero-shot arm needs. It is the same sentence the
+#: adapter row needs in reverse: there, the prompt is not text-only; here, the model is
+#: not fine-tuned *and* is being shown a template published by neither Qwen nor the
+#: project's own config — it is the one the adapter saved.
+ZERO_SHOT_DISCLOSURE = (
+    "'text_only_zero_shot' is the base model with no adapter attached, shown the same "
+    "prompt and parsed by the same parser as the adapter arm; it is also rendered by the "
+    "tokenizer stored *with the adapter* rather than by the base model's own template, so "
+    "the two text arms differ in their weights and not in their tokenisation"
+)
+
+
+def arms_for_mode(mode: str) -> tuple[str, ...]:
+    """The paths a scoring mode produces, in generation order.
+
+    Raises:
+        ValueError: On an unknown mode. The command takes this string from the user, so
+            the error has to name the alternatives rather than fail later with a KeyError
+            from inside a loop.
+    """
+    try:
+        return ARMS_BY_MODE[mode]
+    except KeyError:
+        raise ValueError(
+            f"unknown scoring mode {mode!r}; choose one of {sorted(ARMS_BY_MODE)}"
+        ) from None
+
+
+def difference_plan(
+    arms: Sequence[str],
+    baselines: Sequence[str],
+) -> list[dict[str, Any]]:
+    """Which candidate is subtracted from what, as a list of groups.
+
+    Two arms are not two independent results: the interesting quantity is the difference,
+    and a difference between two rows measured in two processes, on two prompt sets, is
+    not a paired measurement. Every arm is therefore compared against the arm it has to
+    beat *and* against the fitted baselines — in **separate groups**, which is the part
+    that is easy to get wrong.
+
+    Separate, because :func:`paired_differences` restricts a comparison to the rows where
+    every arm it was handed has a score. Passing the other arm and the fitted baselines in
+    one group silently removes the rows where the other arm failed to parse from the
+    comparison against baselines that do not involve it at all. Measured on this
+    repository: adding a zero-shot arm that parsed 4 of 64 rows collapsed the adapter
+    arm's `lora - structured_matched` from 64 rows to 4, and `paired_differences` then
+    reported "not measured" for a comparison that is perfectly measurable without the
+    zero-shot arm.
+
+    Args:
+        arms: The paths scored in this run, in generation order.
+        baselines: The fitted baselines available to compare against, most important
+            first. Passed in rather than derived, because ``structured_matched`` is
+            absent whenever the panel lacks a prompt signal and a difference against an
+            all-NaN arm would be reported as "not measured" beside two real ones.
+
+    Returns:
+        One ``{"candidate": path, "baselines": (...)}`` per comparison, in reading order:
+        for each arm, the arms already scored before it, then the fitted baselines. The
+        candidate is never in its own baseline list, and groups with nothing to compare
+        are omitted.
+
+    Raises:
+        ValueError: If ``arms`` is empty, or if a name appears twice.
+    """
+    if not arms:
+        raise ValueError("no arms to compare: a run that scores nothing has no plan")
+    if len(set(arms)) != len(arms):
+        raise ValueError(f"an arm was listed twice: {list(arms)}")
+    if set(arms) & set(baselines):
+        raise ValueError(
+            f"{sorted(set(arms) & set(baselines))} cannot be both an arm and a baseline"
+        )
+
+    plan: list[dict[str, Any]] = []
+    for index, arm in enumerate(arms):
+        # Earlier arms first: in a two-arm run the base model is the subtraction that
+        # answers "what did fine-tuning buy", and the reading order should not bury it
+        # behind the fitted baselines.
+        others = tuple(arms[:index])
+        if others:
+            plan.append({"candidate": arm, "baselines": others})
+        if baselines:
+            plan.append({"candidate": arm, "baselines": tuple(baselines)})
+    return plan
 
 
 @dataclass(slots=True)
@@ -85,6 +188,15 @@ class PromptIntegrity:
     so a three-label SFT file holds three records under each id whose only difference is
     the ``<TASK>`` block. Keyed on the id alone this check reports a mismatch on two
     rows out of three for a file that is entirely correct — which is how this was found.
+
+    Two turns, two mechanisms. The user turn differs per row, so it is compared row by
+    row. The system turn is a constant — every example carries the same one — and it was
+    **not checked at all** until the zero-shot work surfaced why that matters: the
+    instruction contract (`SYSTEM_PROMPT`) is not compared against anything, so editing it
+    changes what the adapter is shown at scoring time relative to what it was trained on,
+    silently, while this object still reports ``ok``. It is now compared, and any
+    mismatch is fatal, because "the prompts are the ones the adapter trained on" is the
+    sentence that licenses every number downstream.
     """
 
     n_compared: int = 0
@@ -93,6 +205,9 @@ class PromptIntegrity:
     n_scanned: int = 0
     n_other_label: int = 0
     n_unkeyed: int = 0
+    n_system_checked: int = 0
+    n_system_mismatch: int = 0
+    system_example: dict[str, Any] | None = None
     examples: list[dict[str, Any]] = field(default_factory=list)
 
     @property
@@ -107,6 +222,7 @@ class PromptIntegrity:
             self.n_compared > 0
             and self.n_matching == self.n_compared
             and self.n_rebuilt_missing == 0
+            and self.n_system_mismatch == 0
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -117,20 +233,37 @@ class PromptIntegrity:
             "n_rebuilt_missing": self.n_rebuilt_missing,
             "n_other_label": self.n_other_label,
             "n_unkeyed": self.n_unkeyed,
+            "n_system_checked": self.n_system_checked,
+            "n_system_mismatch": self.n_system_mismatch,
+            "system_example": self.system_example,
             "ok": self.ok,
             "examples": self.examples[:5],
         }
 
 
-def _sft_user_turn(record: Mapping[str, Any]) -> str | None:
+def _turns(record: Mapping[str, Any]) -> dict[str, str]:
+    """The ``role -> content`` mapping of an SFT record's messages, for the two roles
+    this check compares."""
     messages = record.get("messages")
     if not isinstance(messages, list):
-        return None
+        return {}
+    found: dict[str, str] = {}
     for message in messages:
-        if isinstance(message, dict) and message.get("role") == "user":
-            content = message.get("content")
-            return content if isinstance(content, str) else None
-    return None
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        content = message.get("content")
+        if role in {"system", "user"} and isinstance(content, str) and role not in found:
+            found[role] = content
+    return found
+
+
+def _sft_user_turn(record: Mapping[str, Any]) -> str | None:
+    return _turns(record).get("user")
+
+
+def _sft_system_turn(record: Mapping[str, Any]) -> str | None:
+    return _turns(record).get("system")
 
 
 def _sample_key(record: Mapping[str, Any]) -> tuple[str, str] | None:
@@ -148,13 +281,20 @@ def _sample_key(record: Mapping[str, Any]) -> tuple[str, str] | None:
 def compare_prompts(
     records: Iterable[Mapping[str, Any]],
     prompts_by_row: Mapping[tuple[str, str], str],
+    *,
+    system_prompt: str = SYSTEM_PROMPT,
 ) -> PromptIntegrity:
-    """Compare an SFT file's user turns against prompts rebuilt from the panel.
+    """Compare an SFT file's turns against prompts rebuilt from the panel.
 
     Args:
         records: Parsed SFT JSONL records, for any label.
         prompts_by_row: ``(sample_id, label) -> rendered user prompt``, rebuilt through the
             same functions training used.
+        system_prompt: The instruction contract as it stands *now*. Every SFT example
+            carries the one that was in force when the file was written, so comparing it
+            is how an edit to `SYSTEM_PROMPT` between training and scoring is caught. It
+            costs one string comparison per record and it is the difference between a
+            check that covers the prompt and one that covers half of it.
 
     Returns:
         The :class:`PromptIntegrity`. ``n_rebuilt_missing > 0`` is a failure of the same
@@ -166,6 +306,17 @@ def compare_prompts(
     integrity = PromptIntegrity()
     for record in records:
         integrity.n_scanned += 1
+        system = _sft_system_turn(record)
+        if system is not None:
+            integrity.n_system_checked += 1
+            if system != system_prompt:
+                integrity.n_system_mismatch += 1
+                if integrity.system_example is None:
+                    integrity.system_example = {
+                        "sft_chars": len(system),
+                        "current_chars": len(system_prompt),
+                        "first_difference": _first_difference(system, system_prompt),
+                    }
         key = _sample_key(record)
         if key is None:
             integrity.n_unkeyed += 1
@@ -231,18 +382,20 @@ class ScoredRun:
     def failure_rate(self) -> float:
         return self.n_dropped / self.n_attempted if self.n_attempted else 0.0
 
+    def parse_dict(self) -> dict[str, Any]:
+        """The parse accounting alone, without the metrics."""
+        return {
+            "n_attempted": self.n_attempted,
+            "n_parsed": self.n_parsed,
+            "n_dropped": self.n_dropped,
+            "n_dropped_positives": self.n_dropped_positives,
+            "parse_failure_rate": self.failure_rate,
+            "reasons": self.failure_reasons,
+        }
+
     def as_dict(self) -> dict[str, Any]:
         payload = self.report.as_dict()
-        payload.update(
-            {
-                "n_attempted": self.n_attempted,
-                "n_parsed": self.n_parsed,
-                "n_dropped": self.n_dropped,
-                "n_dropped_positives": self.n_dropped_positives,
-                "parse_failure_rate": self.failure_rate,
-                "parse_failure_reasons": self.failure_reasons,
-            }
-        )
+        payload.update(self.parse_dict())
         return payload
 
 
@@ -350,6 +503,15 @@ def paired_differences(
         )
 
     truth = usable["y_true"].to_numpy(dtype=float)
+    # The row set is part of the result, not a detail of it. A comparison measured on a
+    # subset of the rows another comparison used is not the same measurement, and the
+    # count alone does not say that the subset was chosen by which arm failed to parse.
+    shortfall = (
+        f"{len(frame) - len(usable)} of {len(frame)} rows are outside this comparison "
+        "because at least one arm has no score there"
+        if len(usable) < len(frame)
+        else ""
+    )
     if truth.size == 0 or truth.min() == truth.max():
         reason = (
             "the paired rows are empty"
@@ -366,7 +528,7 @@ def paired_differences(
                 "ci_high": None,
                 "crosses_zero": None,
                 "n_rows": int(truth.size),
-                "note": reason,
+                "note": "; ".join(part for part in (reason, shortfall) if part),
             }
             for baseline in baselines
             for name in ("pr_auc", "auc")
@@ -387,18 +549,19 @@ def paired_differences(
                 seed=seed,
             )
             record = interval.as_dict()
+            notes = [shortfall] if shortfall else []
+            if interval.n_blocks < 2:
+                notes.append(
+                    "no interval: the test span holds fewer than two blocks, so the "
+                    "resample distribution is degenerate"
+                )
             record.update(
                 {
                     "a": candidate,
                     "b": baseline,
                     "metric": name,
                     "n_rows": int(truth.size),
-                    "note": (
-                        "no interval: the test span holds fewer than two blocks, so the "
-                        "resample distribution is degenerate"
-                        if interval.n_blocks < 2
-                        else ""
-                    ),
+                    "note": "; ".join(notes),
                 }
             )
             records.append(record)
@@ -410,13 +573,14 @@ def build_payload(
     label: str,
     split: str,
     rows: Sequence[Mapping[str, Any]],
-    scored: ScoredRun,
-    adapter: Mapping[str, Any],
+    scored: Mapping[str, ScoredRun],
+    arms: Sequence[str],
+    model: Mapping[str, Any],
     generation: Mapping[str, Any],
     prompt: Mapping[str, Any],
     data: Mapping[str, Any],
     split_definition: Mapping[str, Any] | None = None,
-    predictions: Sequence[Mapping[str, Any]] = (),
+    predictions: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     differences: Sequence[Mapping[str, Any]] = (),
     caveats: Sequence[str] = (),
 ) -> dict[str, Any]:
@@ -425,38 +589,62 @@ def build_payload(
     Section order is reading order: what was asked, of which data, with which model, and
     only then the numbers.
 
+    Three sections moved shape when the zero-shot arm arrived, and the reason is worth
+    stating: an artifact that can describe one arm cannot describe two. ``adapter``
+    became ``model``, because a run with no adapter has no adapter to name; ``parse`` and
+    ``predictions`` became keyed by arm, because two arms have two parse rates and
+    "the parse rate" stopped being a single number. Each section is still one thing —
+    what changed is that the thing is now plural.
+
     Args:
         label: Label scored.
         split: Split scored.
         rows: Every path's metric row, in :data:`COMPARISON_ORDER` where available.
-        scored: The LoRA row's own run, for the parse accounting.
-        adapter: ``AdapterFacts.as_dict()``.
+        scored: The text track's own runs, keyed by arm path, for the parse accounting.
+        arms: The arm paths in reading order. Must match ``scored`` exactly: an arm in one
+            and not the other is a payload whose table and whose accounting disagree.
+        model: ``ModelIdentity.as_dict()`` for the weights that produced the scores.
         generation: Sampling parameters.
         prompt: Integrity plus the signals disclosure.
         data: Provenance of the panel being scored.
         split_definition: The window definition the split came from, when available.
-        predictions: One record per scored row — identifier, outcome, score and raw
-            generation. Present so a reader can recompute the metrics instead of
+        predictions: One record per scored row **per arm** — identifier, outcome, score
+            and raw generation. Present so a reader can recompute the metrics instead of
             trusting them, which is the only way an aggregate AUC can be checked.
         differences: Paired bootstrap results against the baselines.
         caveats: Free-text caveats, appended to the fixed ones.
 
     Returns:
         A JSON-serialisable payload.
+
+    Raises:
+        ValueError: If ``arms`` and ``scored`` disagree, or if either is empty.
     """
+    if set(arms) != set(scored):
+        raise ValueError(
+            f"the arms scored {sorted(scored)} and the arms reported {sorted(arms)} are "
+            "not the same set; one of them would be an unaccounted row in the table"
+        )
+    if not arms:
+        raise ValueError("no arm was scored, so there is nothing to report")
+
     fixed_caveats = [PROMPT_DISCLOSURE]
+    if PATH_ZERO_SHOT in scored:
+        fixed_caveats.append(ZERO_SHOT_DISCLOSURE)
     if data.get("is_synthetic"):
         fixed_caveats.append(
             "the panel is synthetic: the generator planted a text-only component, so a "
             "positive text contribution here is a check on the wiring and exactly zero "
             "evidence about markets"
         )
-    if scored.n_dropped:
-        fixed_caveats.append(
-            f"{scored.n_dropped} of {scored.n_attempted} generations did not parse and "
-            "were dropped; the metrics are conditional on the model producing usable "
-            "output"
-        )
+    for arm in arms:
+        run = scored[arm]
+        if run.n_dropped:
+            fixed_caveats.append(
+                f"{arm}: {run.n_dropped} of {run.n_attempted} generations did not parse "
+                "and were dropped; that arm's metrics are conditional on the model "
+                "producing usable output"
+            )
     return {
         "metadata": {
             "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -465,20 +653,16 @@ def build_payload(
         },
         "data": dict(data),
         "split_definition": dict(split_definition or {}),
-        "adapter": dict(adapter),
+        "model": dict(model),
+        "arms": list(arms),
         "generation": dict(generation),
         "prompt": dict(prompt),
         "rows": [dict(row) for row in rows],
-        "parse": {
-            "n_attempted": scored.n_attempted,
-            "n_parsed": scored.n_parsed,
-            "n_dropped": scored.n_dropped,
-            "n_dropped_positives": scored.n_dropped_positives,
-            "parse_failure_rate": scored.failure_rate,
-            "reasons": scored.failure_reasons,
-        },
+        "parse": {arm: scored[arm].parse_dict() for arm in arms},
         "differences": [dict(item) for item in differences],
-        "predictions": [dict(item) for item in predictions],
+        "predictions": {
+            arm: [dict(item) for item in (predictions or {}).get(arm, ())] for arm in arms
+        },
         "caveats": [*fixed_caveats, *caveats],
     }
 
@@ -486,22 +670,28 @@ def build_payload(
 def render_markdown(payload: Mapping[str, Any]) -> str:
     """Render the payload as a short report. Numbers first, then what they are not."""
     metadata = payload["metadata"]
+    arms = list(payload.get("arms", []))
     lines = [
-        f"# LoRA evaluation — {metadata['label']} / {metadata['split']}",
+        f"# Text-track evaluation — {metadata['label']} / {metadata['split']}",
         "",
         f"Generated {metadata['generated_at']}.",
         "",
         "## Comparison",
         "",
-        "| path | AUC | KS | PR-AUC | base rate | positives | n rows |",
-        "| --- | --- | --- | --- | --- | --- | --- |",
+        "| path | role | AUC | KS | KS dir | PR-AUC | base rate | positives | n rows |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for row in payload["rows"]:
         lines.append(
-            "| {path} | {auc} | {ks} | {pr_auc} | {base} | {pos} | {n} |".format(
+            "| {path} | {role} | {auc} | {ks} | {ks_dir} | {pr_auc} | {base} | {pos} | {n} |".format(
+                # The role is in the table rather than in a sentence below it: which rows
+                # came from a model and which were fitted is the first thing a reader has
+                # to know to subtract anything at all.
                 path=row.get("path", "?"),
+                role="arm" if row.get("path") in arms else "baseline",
                 auc=_number(row.get("auc")),
                 ks=_number(row.get("ks")),
+                ks_dir=row.get("ks_direction") or "?",
                 pr_auc=_number(row.get("pr_auc")),
                 base=_number(row.get("base_rate")),
                 pos=row.get("n_positives", "?"),
@@ -531,20 +721,43 @@ def render_markdown(payload: Mapping[str, Any]) -> str:
                 )
             )
 
-    parse = payload["parse"]
-    adapter = payload["adapter"]
+    model = payload["model"]
+    parse = payload.get("parse", {})
+    adapter = model.get("adapter")
     prompt = payload["prompt"]
+    if adapter is None:
+        identity_line = (
+            f"- weights: base model `{model.get('base_model')}` with **no adapter**, "
+            f"{model.get('quantization')}"
+        )
+    else:
+        identity_line = (
+            f"- weights: base model `{model.get('base_model')}` plus adapter "
+            f"`{adapter.get('weights_file')}` sha256 "
+            f"`{str(adapter.get('weights_sha256'))[:16]}…` ({adapter.get('weights_bytes')} bytes), "
+            f"rank {adapter.get('rank')}, {model.get('quantization')}"
+        )
     lines += [
         "",
         "## What produced these numbers",
         "",
-        f"- adapter `{adapter.get('weights_file')}` sha256 `{str(adapter.get('weights_sha256'))[:16]}…` "
-        f"({adapter.get('weights_bytes')} bytes), rank {adapter.get('rank')}, base `{adapter.get('base_model')}`",
-        f"- tokenizer source: {adapter.get('tokenizer_source')}",
+        f"- mode: {model.get('mode')} — arms scored: {', '.join(f'`{arm}`' for arm in arms)}",
+        identity_line,
+        f"- base model source: {model.get('base_model_source')}",
+        f"- tokenizer: {model.get('tokenizer_source')} at `{model.get('tokenizer_path')}`",
         f"- generation: {payload['generation']}",
         f"- prompt integrity against the SFT file: {prompt.get('integrity', {})}",
-        f"- parse: {parse['n_parsed']}/{parse['n_attempted']} usable, "
-        f"failure rate {parse['parse_failure_rate']:.4f}, dropped positives {parse['n_dropped_positives']}",
+    ]
+    for arm in arms:
+        accounting = parse.get(arm)
+        if accounting is None:
+            continue
+        lines.append(
+            f"- parse ({arm}): {accounting['n_parsed']}/{accounting['n_attempted']} usable, "
+            f"failure rate {accounting['parse_failure_rate']:.4f}, "
+            f"dropped positives {accounting['n_dropped_positives']}"
+        )
+    lines += [
         "",
         "## Caveats",
         "",
@@ -607,12 +820,17 @@ def write_artifact(payload: Mapping[str, Any], out_dir: Path) -> dict[str, Path]
 
 
 __all__ = [
+    "ARMS_BY_MODE",
     "PATH_LORA",
+    "PATH_ZERO_SHOT",
     "PROMPT_DISCLOSURE",
+    "ZERO_SHOT_DISCLOSURE",
     "PromptIntegrity",
     "ScoredRun",
+    "arms_for_mode",
     "build_payload",
     "compare_prompts",
+    "difference_plan",
     "paired_differences",
     "render_markdown",
     "score_from_attempts",

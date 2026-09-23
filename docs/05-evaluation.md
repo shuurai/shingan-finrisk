@@ -326,6 +326,10 @@ def full_evaluation(y_true, y_pred, future_return=None):
 
 这条基线已经进入标准报告：`shingan eval run` 的对比表自 2026-09-23 起有 **4 行**（`structured`、`structured_matched`、`text_baseline`、`fused`），此前的报告只有 3 行。它的拟合与打印顺序由 `pipeline.COMPARISON_ORDER` 决定，而 `PATH_ORDER` 仍是三条**轨道**——控制项不进 `PATH_ORDER`，否则它会经 `score_*` 列渗进漂移、滚动稳定性、压力测试与消融表。
 
+**`text_only_zero_shot` 与 `text_only_lora` 必须同一次跑出来。** 它们的价值是**差值**（微调买到了什么），而跨两次命令的两个数字不是一次配对测量。`shingan eval lora --mode both` 用同一份 base 权重、同一个 tokenizer、同一组 prompt 依次生成两臂，并把 `lora - zero_shot` 作为一条配对区间报出；`--mode zero_shot` 则只出零样本臂。两者都用 `structured_matched` 作为同信息量基线。
+
+**这一行当前的状态（2026-09-23）**：命令已存在，但在合成 test 块上**不可引用**——零样本臂 64 行里只有 4 行通过 schema 校验（失败率 0.9375），且这 4 行全是负样本（9 个正样本全部被丢弃），因此 AUC / PR-AUC 无从计算。失败原因是**指令契约缺口**而非模型能力：`SYSTEM_PROMPT` 没有枚举 `source_type` 的合法取值。详见 [09 LoRA 评测](09-lora-evaluation.md) 第 12 节。
+
 这张表直接对应 `shingan eval compare --runs structured text fused`。
 
 ### 5.2 消融
