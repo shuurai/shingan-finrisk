@@ -286,14 +286,16 @@ shingan eval compare --runs structured text fused
 
 以下条目必须读作"未验证"，不得在对外材料中当作已完成工作：
 
-- **14B 真实训练尚未产出过 checkpoint。** 整条链路已用同族 tiny 模型端到端验证（`scripts/smoke_train.py`：配置 → 映射 → 训练器 → 一步优化 → adapter → `run.json`），真实底座的上一轮运行在"参数被本机 `transformers`/`trl` 接受"这一步因 `warmup_ratio` 中断，其后没有完成的运行。因此第 2.2 节的配置**没有被真实训练验证过**。
+- **14B 训练已产出 checkpoint，但它证明的是链路，不是能力。** `artifacts/lora/adapter/`（Qwen3-14B、108 步、42:18、`run.json` 记下 `warmup_steps=3` 与六个训练库版本）是第 2.2 节配置**第一次被真实底座完整跑通**，因此该配置已不再是"未被验证"的状态。但它的语料来自 `configs/default.yaml` 的默认 `sources: [synthetic]`（`sample_id` 形如 `SXAA-20100101`），所以"训练链路在 32 GB 单卡上端到端可用"是事实，"训出了金融风险模型"不是。
+- **同分布评测显示这个 adapter 的输出是常量，不是"弱"。** `shingan eval lora` 在合成 test 块上得到 AUC **0.5000** / KS **0.0000**，64 行全部 `score: 0.0`、`severity` 全为 `low`、首个 `reasons` 模板只有一种。AUC 恰为 0.5 意味着该列不携带任何排序信息。**因此 `text_only_lora` 目前不能作为 Track B 的性能引用，也不能用来回答"文本有没有增量"。** 这与训练语料 566 行 / 18 正样本的算术一致：在低基率下最小化损失的最优解就是恒定输出。完整记录见 [09 LoRA 评测接入](09-lora-evaluation.md)。
 - **合成数据上的"文本轨有增益"是生成器构造出来的**，不是实验发现。融合增益在合成数据上为正只说明实现与设计一致，不构成真实世界证据。
-- **文本基线（`text_baseline.py`）与 14B LoRA 的相对表现未知**。TF-IDF 基线是否已经足够，目前无法回答。
+- **文本基线（`text_baseline.py`）与 14B LoRA 的相对表现**：在合成数据上 TF-IDF 明显更好，因为 LoRA 那一列是常量；**在真实数据上仍是未知**——真实 `tail_risk` 的 train 切分只有 4 个正样本，训 14B 只会再学出一个常量。瓶颈是正样本数，不是数据 provenance。
 - **三个底座（8B / 14B / 30B-A3B）之间没有做过对比实验**，选型理由是显存与任务性质的推理，不是实测。
 - **校准器的选择阈值 `min_pos_for_isotonic=50` 是经验值**，未在真实基率下验证过。`fraud_risk` 在 POC 规模下大概率只能走 Platt，其校准质量未知。
 - **超参数未调**。第 2.2 节的配置来自常用取值范围与常见实践，不是搜索结果。
-- **报告的 `/evidence` 子串校验未在真实 EDGAR 文本上跑过**，因为真实文本尚未接入。
-- **EDGAR 客户端与价格/新闻适配器未对 live 端点验证**（见[数据](02-data.md)）；因此"真实数据训练"这条路径的整体可行性尚未证实。
+- **`evidence[].quote` 的逐字校验在真实 EDGAR 文本上的余量未知。** 校验本身是硬门（`sft_examples` 里任何一条引用不是逐字命中就 `ValueError` 拒绝写出训练文件），所以"语料存在"等价于"当时全部通过"。但通过得有多勉强——比如有多少条是从超长段落里切出来的、有多少条接近长度下限——没有被记录，因此真实 10-K/10-Q 上这道门的脆弱程度读不出来。
+- **适配器从未在真实文本上被评分过。** 真实数据上的 `text_only_lora` 需要 GPU 推理；按 2026-09-23 的决定，在正样本扩容之前不再为这个常量花 GPU（见 [09](09-lora-evaluation.md) 第 7、9 节）。
+- **价格与 EDGAR 适配器已对 live 端点验证，其余没有。** `scripts/fetch_real.py` 已真实跑出 `data/raw/real/`（prices 114,424 行、fundamentals 2,189、filings 2,879）。**新闻（FNSPID）与事件（评级/执法）两个源仍未接入**，所以 `n_news_*` / `sent_*` 在真实面板上是零、`default_risk` 与 `fraud_risk` 无法评测；"真实数据训练"这条路径的整体可行性因此只对 `tail_risk` 成立（见[数据](02-data.md)）。
 
 ## 6. 训练环境安装
 

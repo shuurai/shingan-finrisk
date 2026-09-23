@@ -1,8 +1,8 @@
 # Shingan 心眼
 
 [![ci](https://github.com/shuurai/shingan-finrisk/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/shuurai/shingan-finrisk/actions/workflows/ci.yml)
-![tests](https://img.shields.io/badge/tests-193%20passed-brightgreen)
-![coverage](https://img.shields.io/badge/coverage-37%25-yellow)
+![tests](https://img.shields.io/badge/tests-245%20passed-brightgreen)
+![coverage](https://img.shields.io/badge/coverage-43%25-yellow)
 ![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)
 ![license](https://img.shields.io/badge/license-Apache--2.0-blue)
 
@@ -25,8 +25,8 @@
 
 - **双轨架构**：Track A 是结构化信号上的校准梯度提升模型；Track B 是读取 SEC 文件与新闻的 QLoRA 指令微调模型；一层薄 fusion 融合两路。目标是在严格 point-in-time 纪律与 purge/embargo 时序验证下的排序质量与校准，**不是收益预测**。
 - **三个标签**：`default_risk`（评级下调/破产，365 天）、`fraud_risk`（重述/执法/非标审计意见，730 天）、`tail_risk`（30 交易日回撤劣于 −30%），均在同一套 as-of/无前视纪律下计算。
-- **硬性评测要求**：任何声称有效的模型必须同时给出 structured-only、text-only、fused 三路结果加无模型基线。
-- **当前状态**：流水线在合成数据上端到端可跑；Stage 2 已在真实数据（34 家公司、`tail_risk`、2221 行面板）上跑过一次——structured AUC 0.7686 / KS 0.5873 / PR-AUC 0.0258，但 test 块仅 5 个正样本，**不构成性能结论**；三路消融显示文本轨当前没有可度量的增量。QLoRA 训练**尚未产出 adapter**：真实运行在构造训练器时因 `transformers` v5 移除的键而中断，该问题已修，且参数现在会在加载模型之前被校验（[训练文档](docs/04-training.md)第 2.6 节）。
+- **硬性评测要求**：任何声称有效的模型必须同时给出 structured-only、text-only、fused 三路结果加无模型基线；而因为文本轨的 prompt 里带着 `STRUCTURED_SIGNALS` 块，还必须给出**同信息量基线** `structured_matched`（同一估计器、只用 prompt 里那 12 个信号）——`text-only − structured_matched` 才是"文本带来了什么"。
+- **当前状态**：流水线在合成数据上端到端可跑；真实数据（34 家公司、`tail_risk`、2221 行面板）上已有**四行对比**——structured AUC 0.6294 / KS 0.4407 / PR-AUC 0.0160、同信息量基线 `structured_matched` 0.7497、文本基线 0.3281、fused 0.6924。但 test 块只有 **5 个正样本**，融合增益区间 **跨零**，因此**不构成性能结论**；文本轨的贡献仍是**未知**。QLoRA 已训出一个真实底座的 adapter（Qwen3-14B / 108 步），但同分布评测显示它的输出是**常量**（AUC 恰 0.5），所以它证明的是训练链路可用、不是预测能力（[09 LoRA 评测](docs/09-lora-evaluation.md)）。**这条路上的真正瓶颈是监督密度**：真实的 39 个可观测正样本里有 29 个落在切分空档（2020 整年被 `valid`/`test` 夹掉）。
 - **已发布**：数据卡 [`shuurai2000/shingan-finrisk-labels`](https://huggingface.co/datasets/shuurai2000/shingan-finrisk-labels)（英文，0 占位符，全部为实测值）。
 - 设计文档在 [`docs/`](docs/)（中文），标注数据集卡模板在 [`templates/`](templates/)。
 
@@ -146,37 +146,42 @@ python -m pytest -m "not network and not gpu and not slow" -q --cov=shingan
 
 | Metric | Value |
 | --- | --- |
-| Tests | **193 passing** |
-| Suite time | **~5 s** (tests only) |
-| Test files | 11 |
+| Tests | **245 passing** |
+| Suite time | **~6 s** (tests only); ~9 s with coverage |
+| Test files | 14 |
 | Skipped branches | the `network` / `gpu` / `slow` markers — no tests currently live under them. Two tests in `test_lora_arguments.py` skip themselves where the `train` extra is absent: they check the mapping against the *installed* trainer signature, which is the whole point of them |
 
 | File | Tests | Covers |
 | --- | --- | --- |
 | [`tests/test_metrics.py`](tests/test_metrics.py) | 43 | AUC / KS / PR-AUC / ECE / capture, tied-score behaviour, sklearn cross-check |
+| [`tests/test_lora_eval.py`](tests/test_lora_eval.py) | 36 | `(sample_id, label)` as the prompt-comparison key, parse-failure taxonomy, strict JSON (`NaN` is not JSON), paired-bootstrap sign and degeneracy, adapter fingerprinting |
 | [`tests/test_caveats.py`](tests/test_caveats.py) | 22 | missing-feature diagnostics, grouping by source, actionable advice, disclosure of years a window does not cover |
 | [`tests/test_models.py`](tests/test_models.py) | 22 | persistence contracts and round-trips for the three tracks, ablation-table completeness |
 | [`tests/test_sec_docs.py`](tests/test_sec_docs.py) | 22 | EDGAR archive URL assembly, UA validation, partial-write protection, resume |
 | [`tests/test_lora_arguments.py`](tests/test_lora_arguments.py) | 22 | config → trainer-argument mapping, `warmup_ratio` → `warmup_steps` translation, refusal of a key the installed trainer no longer accepts |
 | [`tests/test_text_features.py`](tests/test_text_features.py) | 15 | section splitting, heading recognition, empty document vs "no negative words" |
+| [`tests/test_matched_in_report.py`](tests/test_matched_in_report.py) | 11 | the control staying out of `PATH_ORDER`, a missing control being omitted rather than blanked, console row order matching artifact row order, the KS direction travelling with the KS |
 | [`tests/test_publish_hf.py`](tests/test_publish_hf.py) | 11 | values injection, selective refusal, template-link integrity |
 | [`tests/test_report_gates.py`](tests/test_report_gates.py) | 11 | a gate row's target/achieved/verdict staying mutually consistent |
 | [`tests/test_labeling.py`](tests/test_labeling.py) | 9 | the three label event definitions and right-edge truncation |
 | [`tests/test_splits.py`](tests/test_splits.py) | 9 | purge / embargo, rolling-window usability |
 | [`tests/test_builder_text.py`](tests/test_builder_text.py) | 7 | panel assembly and text-column wiring |
+| [`tests/test_prompt_labels.py`](tests/test_prompt_labels.py) | 5 | one prompt per label, at the seam: the rendered prompt has to be asked the question it is being scored on |
 
-### Coverage: 37%, and it is not a threshold
+### Coverage: 43%, and it is not a threshold
 
 | Scope | Statement coverage |
 | --- | --- |
-| **Total** | **37%** (5,944 statements, 3,457 missed) |
+| **Total** | **43%** (6,380 statements, 3,349 missed) |
 | `models/persistence.py` | 100% |
+| `eval/lora.py` | 89% |
 | `features/text.py` | 86% |
 | `models/fusion.py` / `models/text_baseline.py` | 79% |
+| `eval/metrics.py` | 74% |
 | `models/structured.py` | 72% |
-| `eval/metrics.py` | 49% |
-| `models/lora.py` | 32% (the argument mapping is pure and covered; the training loop needs the GPU) |
-| `cli.py` | 26% (publish and doctor paths covered) |
+| `models/lora_inference.py` | 58% (prompt assembly, adapter fingerprinting and the parse taxonomy are covered; the parts that need a GPU are not) |
+| `models/lora.py` | 33% (the argument mapping is pure and covered; the training loop needs the GPU) |
+| `cli.py` | 24% (publish and doctor paths covered) |
 | `data/prices.py` / `data/news.py` | 0% |
 
 **The number is low, and low for a stated reason.** Coverage is not this project's acceptance criterion — the only thing qualified to act as a gate is the seven gates in section 9 of the [evaluation doc](docs/05-evaluation.md). The only legitimate reason to add a test is regression protection, not pushing a percentage up:
@@ -205,21 +210,28 @@ Only one background check passes out of seven. **"The PR-AUC interval excludes z
 
 ### Three-track ablation: the text track currently adds nothing
 
-The three-track comparison from `shingan demo` — same test block, same label definitions, the only variable being which track is used. Base rate and positive counts are listed alongside, because an AUC on a 64-row, 9-positive test block should never be quoted alone.
+The comparison from `shingan demo` — same test block, same label definitions, the only variable being which track is used. Base rate and positive counts are listed alongside, because an AUC on a 64-row, 9-positive test block should never be quoted alone.
+
+`structured_matched` is the same estimator restricted to the **twelve** structured signals the text prompt actually carries. It is there for one arithmetic reason: subtracting text-only from `structured` (49 features) measures two information sets as well as two model classes, so it looks like an answer without being one. `text-only − structured_matched` is the subtraction that means "the text contributed this".
 
 | Label | Track | AUC | KS | PR-AUC | ECE | Base rate / positives |
 | --- | --- | --- | --- | --- | --- | --- |
 | `default_risk` | structured | 0.5931 | 0.1931 | 0.5317 | 0.0496 | 0.4531 / 29 |
+| | structured_matched | 0.4374 | 0.1399 | 0.4207 | 0.1563 | |
 | | text-only | 0.3773 | 0.2335 | 0.3755 | 0.1191 | |
 | | fused | 0.4759 | 0.1192 | 0.4365 | 0.1416 | |
 | `fraud_risk` | structured | 0.6904 | 0.3568 | 0.2968 | 0.0534 | 0.1719 / 11 |
+| | structured_matched | 0.5506 | 0.1715 | 0.2083 | 0.0714 | |
 | | text-only | **0.7684** | **0.5043** | **0.6091** | 0.1026 | |
 | | fused | 0.7084 | 0.3756 | 0.4152 | 0.1062 | |
 | `tail_risk` | structured | 0.5434 | 0.2323 | 0.1670 | 0.1335 | 0.1406 / 9 |
-| | text-only | 0.4404 | 0.3374 | 0.2400 | 0.1403 | |
-| | fused | 0.4505 | 0.3152 | 0.1530 | 0.1285 | |
+| | structured_matched | 0.5091 | 0.2727 | 0.1492 | 0.1412 | |
+| | text-only | 0.4424 | 0.3374 | 0.2956 | 0.1402 | |
+| | fused | 0.4525 | 0.3152 | 0.1538 | 0.1285 | |
 
-An observation worth recording: on `fraud_risk` the text track alone posts the best AUC of the whole table (0.7684), while on the other two labels it is below random. **That directional inconsistency is itself the result** — on 9–29 positives, no difference between the three tracks is statistically significant, and the fusion layer fails to beat structured-only on all three labels. The honest statement is "indistinguishable at the current sample size", not "text helps" or "text doesn't help".
+An observation worth recording: on `fraud_risk` the text track alone posts the best AUC of the whole table (0.7684), while on the other two labels it is below random. **That directional inconsistency is itself the result** — on 9–29 positives, no difference between the tracks is statistically significant, and the fusion layer fails to beat structured-only on all three labels. The honest statement is "indistinguishable at the current sample size", not "text helps" or "text doesn't help".
+
+One row moved for a reason worth naming: `tail_risk` text-only PR-AUC was 0.2400 before 2026-09-23. The prompt interpolates the question being asked (`label=... horizon_days=...`), and the pipeline rendered every label's prompt with `default_risk` hardcoded — so the TF-IDF baseline was being scored on `tail_risk` while its prompt asked about `default_risk` over 365 days instead of 30. The fix is `text_inputs(..., label)` and it applies to the LoRA scoring path identically.
 
 ### Reproducing
 
@@ -303,9 +315,11 @@ Status vocabulary:
 | SEC EDGAR client | Implemented · verified (submissions, companyfacts, full-text search and `/Archives` bodies all exercised on real data; the body corpus is ingested, see below) |
 | Price data adapter (yfinance / Stooq) | Implemented · verified (yfinance returned daily bars for 31/34 tickers) |
 | News adapter (FNSPID, offline dataset) | Interface defined · unverified |
-| QLoRA training | **No completed adapter yet** — the real path is wired and smoke-verified end to end on a tiny model; no 14B run has finished |
-| Fusion layer | Implemented · verified (gain over structured-only on real data is **negative**) |
-| **Real-data result (Stage 2 / `tail_risk` / 34 companies / 2,221-row panel)** | **structured AUC 0.7686, KS 0.5873, PR-AUC 0.0258; text baseline 0.4074; fused 0.6554. Only 5 test positives — not a performance claim** |
+| QLoRA training | Implemented · verified for the *link* — `artifacts/lora/adapter/` is a completed 108-step 14B adapter. **But its output is constant under in-distribution evaluation** (AUC exactly 0.5000, every row the same score), so it is evidence that the stack works on 32 GB, not evidence of predictive power |
+| LoRA inference and scoring path (`shingan eval lora`) | Implemented · verified (training prompts rebuilt byte-identically, 260/260, under `--verify-prompts`) |
+| Same-information control `structured_matched` | Implemented · verified (a row of the standard report since 2026-09-23; the LoRA prompt carries twelve structured signals, so subtracting from the full-feature `structured` mixes information sets with model classes) |
+| Fusion layer | Implemented · verified (gain over structured-only on real data **crosses zero**) |
+| **Real-data result (34 companies / 2,221-row panel)** | **structured AUC 0.6294 / KS 0.4407 / PR-AUC 0.0160; `structured_matched` 0.7497; text baseline 0.3281; fused 0.6924** on 492 test rows holding **5 positives** — see the honesty statement: this is not a performance claim |
 | Label review (all 39 `tail_risk` positives) | Implemented · verified (independent recomputation, disagreement 0.00%) |
 | Real event labelling for the three in-scope labels | Designed · not implemented (`default_risk` / `fraud_risk` event sources not connected) |
 | `publish hf` | Implemented · verified for the dataset card (published live); model card pending training |
@@ -315,15 +329,17 @@ Status vocabulary:
 
 The synthetic-data demo in this repo proves exactly one thing: **the pipeline runs** — data generation, as-of checks, feature construction, both track trainings, fusion, splitting, metric computation and report rendering are all wired together. It does **not** prove the models have real predictive power. The signal in the synthetic data is planted by the generator; good metrics only reflect the implementation matching the design.
 
-Stage 2 has run once on real data; artifacts are in `artifacts/stage2/`. When reading those numbers, note the following — not boilerplate disclaimers, but the actual boundaries of the current result:
+Stage 2 has run on real data; the current artifacts are in `artifacts/reports/`. When reading those numbers, note the following — not boilerplate disclaimers, but the actual boundaries of the current result:
 
-- **The test block has 5 positives.** AUC 0.7686 rests on 5 positive examples; swapping any one would move it materially. Per section 10 of the [evaluation doc](docs/05-evaluation.md) this triggers F8: it is not a performance claim, only evidence that the pipeline can compute interval-carrying metrics (or state clearly why it cannot) on real data.
-- **The fusion layer adds nothing.** Fused PR-AUC is 0.0075 *below* structured-only, with an interval crossing zero. The text track currently provides no measurable increment — and that is exactly the question this project set out to answer. The current answer is "no", not "yes".
-- **SEC filing bodies: ingested, but the evaluation has not been re-run on the new panel.** During the Stage 2 run, `www.sec.gov/Archives` returned 403 ("Undeclared Automated Tool") to every User-Agent from this network. The real cause turned out to be not the UA's shape but the domain of the contact e-mail inside it: plain domains like `research@shingan.dev` got 200, while `a@github.com`, browser UAs and `curl/8.4.0` all got 403. The downloader `scripts/fetch_sec_docs.py` (3-way concurrency, disk cache, resume, atomic writes) then retrieved all 2,222 bodies (0 failures, ~10 GB, 56 minutes) and `filings.parquet` was rebuilt from cache. The panel has been rebuilt with real text: `risk_factor_token_share` is non-zero for 1,774 of 2,221 rows and `neg_kw_density_mdna` for 1,372 (before the fix both columns were **all zero**). But 15 of the 49 configured features still have zero coverage and were dropped at fit time, and **the three-track evaluation has not been re-run** — so the fused comparison in the table above is still the text-free comparison. Availability will change again; any fetcher must carry a disk cache and resume.
-- **`default_risk` and `fraud_risk` are not implemented.** Their real event sources (rating history, enforcement actions) are not connected; Stage 2 evaluated `tail_risk` only.
+- **The test block has 5 positives.** AUC 0.6294 rests on 5 positive examples; swapping any one would move it materially. Per section 10 of the [evaluation doc](docs/05-evaluation.md) this triggers F8: it is not a performance claim, only evidence that the pipeline can compute interval-carrying metrics (or state clearly why it cannot) on real data. The same run is the reason `ks_direction` now travels with `ks`: the text baseline posts AUC 0.3281 (an inverted ranking) alongside a KS of 0.5692, and a direction-agnostic KS printed alone reads as the strongest separation in the table.
+- **The fusion layer still adds nothing measurable.** Fused PR-AUC is 0.0030 above structured-only, with an interval that **crosses zero** ([−0.0008, 0.0157]). The text track provides no measurable increment — and that is exactly the question this project set out to answer. The current answer is "not shown", not "yes".
+- **The text track's own number is a constant, not a weak model.** In-distribution, `text_only_lora` scores AUC exactly 0.5000 with KS 0.0000, and all 64 rows receive `score: 0.0`. It learned the output format and not the ordering, which is what 566 rows with 18 positives admits as the minimum-loss solution. Full record: [09 LoRA evaluation](docs/09-lora-evaluation.md).
+- **SEC filing bodies are ingested and the evaluation has been re-run on the new panel.** During the first Stage 2 run, `www.sec.gov/Archives` returned 403 ("Undeclared Automated Tool") to every User-Agent from this network. The real cause turned out to be not the UA's shape but the domain of the contact e-mail inside it: plain domains like `research@shingan.dev` got 200, while `a@github.com`, browser UAs and `curl/8.4.0` all got 403. The downloader `scripts/fetch_sec_docs.py` (3-way concurrency, disk cache, resume, atomic writes) then retrieved all 2,222 bodies (0 failures, ~10 GB, 56 minutes). **This matters for reading history**: the numbers in `artifacts/stage2/` were produced when all seven filing-derived features were empty — the run's own caveat listed 15 dropped features including every one of them. The panel now drops 8, so `structured` 0.7686 → 0.6294 is the text layer arriving, not a regression. Availability will change again; any fetcher must carry a disk cache and resume.
+- **74% of the real positives sit in the gap between the split blocks.** The panel holds 39 observable `tail_risk` positives, but only 10 are reachable: train 4, valid 1, test 5. All 124 observable 2020 rows (27 positives) are `excluded`, because `valid` ends 2019-12-31 and `test` starts 2021-01-01 — the one year these 34 names actually had a systematic drawdown falls between them. Another 2 positives sit in the purge margin. The walk-forward configuration does cover 2020, so this is a split-geometry choice rather than a property of the data.
+- **`default_risk` and `fraud_risk` are not implemented.** Their real event sources (rating history, enforcement actions) are not connected; real evaluation covers `tail_risk` only. The news source is unwired, so every `n_news_*` / `sent_*` column is empty.
 - **The price table is missing MRO / WBA / X.** These three have filings but no price series; their rows are now correctly marked unobservable (see section 5 of `artifacts/stage2/label_review.md`: before the fix they were counted as negatives, which had inflated the structured AUC).
 
-Apart from the Stage 2 numbers listed here, every other number in this documentation set should be read as a **target**, not an achievement.
+Apart from the real-data numbers listed here, every other number in this documentation set should be read as a **target**, not an achievement.
 
 ## Documentation
 
@@ -340,6 +356,7 @@ The design documents are written in Chinese; each is linked with an English glos
 | [06 Windows setup](docs/06-windows-setup.md) | step-by-step Windows 11 + RTX 5090 setup, cu128 install, troubleshooting table |
 | [07 Roadmap](docs/07-roadmap.md) | Stage 0–5 plan and promotion conditions |
 | [08 Naming decisions](docs/08-naming.md) | candidate-name comparison, naming family, rename procedure |
+| [09 LoRA evaluation](docs/09-lora-evaluation.md) | step log for wiring the trained adapter into evaluation: what was decided, what was run, what it verified and what it did not |
 | [ADR](docs/adr/) | architecture and naming decision records |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | dev environment, commit conventions, test requirements |
 

@@ -2,7 +2,9 @@
 
 评测框架的目标不是给出一个好看的数字，而是让"文本轨是否带来增量"成为一个可以被证伪的实验问题。本文定义指标与目标门槛、切分设计（含 purge 与 embargo）、六项会导致错误结论的实现陷阱、压力测试、基线与消融、漂移监控、可解释性、POC 验收门槛，以及明确写出的证伪条件。
 
-**门槛的读法**：文中所有指标数值都是**目标值（target/gate）**，不是达成值。仓库中目前不存在任何真实数据评测结果。
+**门槛的读法**：文中所有指标数值都是**目标值（target/gate）**，不是达成值。
+
+真实数据上的评测**已经跑过**（`artifacts/reports/`，34 家公司 / 2,221 行面板 / 492 行 test）。但它不改变上面那句话：那次运行的门禁结果是 `headline_auc` 未达、融合增益区间跨零、`brier_beats_base_rate` 未达，而且 test 块只有 **5 个正样本**——按本文第 10 节的 F8，这不构成性能声明。文本轨的增量至今**未知**，理由见 [09 LoRA 评测](09-lora-evaluation.md)。
 
 ## 1. 评测原则
 
@@ -313,11 +315,16 @@ def full_evaluation(y_true, y_pred, future_return=None):
 | `buy_and_hold` | 无 | 回测基准：S&P 500 买入持有 |
 | `equal_weight` | 无 | 回测基准：等权组合 |
 | `structured_only` | 财务比率 + 技术 + 文本计数量 | Track A 单独表现；**融合判据的对照** |
+| `structured_matched` | **只**用 prompt 里那 12 个结构化信号 | **同信息量基线**：`text_only_* - structured_matched` 才是文本增量 |
 | `text_only_tfidf` | 文本（词袋/TF-IDF） | 文本是否有用，与 LLM 无关 |
 | `text_only_zero_shot` | 文本 + 基础模型零样本 prompt | 微调带来的增量 |
 | `text_only_lora` | 文本 + QLoRA 微调 | Track B 单独表现 |
 | `fused_stacker` | Track A + Track B 分数 | **主结果** |
 | `fused_rank_avg` | Track A + Track B 分数 | 对融合方式是否敏感的对照 |
+
+**为什么必须有 `structured_matched`，而不是拿 `structured_only` 相减。** 文本轨的 prompt 里带 `<STRUCTURED_SIGNALS>` 块，含 `PROMPT_SIGNAL_COLUMNS` 那 12 个信号（见 4 节陷阱与 02-data）。也就是说 `text_only_lora` 的输入**不是纯文本**，而 `structured_only` 用的是全特征集。两者相减同时混入"模型不同"与"信息集不同"两个因素，结果看起来像一个答案，其实不是。把同一个估计器限制在那 12 列、用同一 train/valid/test 与同一校准折再拟合一次，减法才只表示"文本带来了什么"。
+
+这条基线已经进入标准报告：`shingan eval run` 的对比表自 2026-09-23 起有 **4 行**（`structured`、`structured_matched`、`text_baseline`、`fused`），此前的报告只有 3 行。它的拟合与打印顺序由 `pipeline.COMPARISON_ORDER` 决定，而 `PATH_ORDER` 仍是三条**轨道**——控制项不进 `PATH_ORDER`，否则它会经 `score_*` 列渗进漂移、滚动稳定性、压力测试与消融表。
 
 这张表直接对应 `shingan eval compare --runs structured text fused`。
 

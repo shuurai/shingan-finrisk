@@ -502,11 +502,24 @@ def extract_json_object(text: str) -> str | None:
     return match.group(0)
 
 
+def _refuse(reason: str, sink: list[str] | None) -> None:
+    """Record why one generation was rejected.
+
+    The reason string is produced once and used twice — written to the debug log and
+    appended to the caller's sink. Kept in one place so the log and the caller's
+    tally cannot end up disagreeing about what went wrong.
+    """
+    logger.debug("%s", reason)
+    if sink is not None:
+        sink.append(reason)
+
+
 def parse_assessment(
     text: str,
     *,
     expected_label: str | None = None,
     expected_horizon_days: int | None = None,
+    failure_reason: list[str] | None = None,
 ) -> RiskAssessment | None:
     """Parse and validate a model response.
 
@@ -519,21 +532,25 @@ def parse_assessment(
         expected_label: If given, the parsed label must match; a mismatch means the
             model answered a different question than the one asked.
         expected_horizon_days: If given, the parsed horizon must match.
+        failure_reason: If given, the reason for a rejection is appended to it. A
+            scoring run needs the *rate* to judge whether its numbers mean anything,
+            and a bare None cannot distinguish "the model wrote prose" from "the
+            model answered the wrong label" — two failures with different fixes.
 
     Returns:
         The validated assessment, or None if the output was unusable.
     """
     payload_text = extract_json_object(text)
     if payload_text is None:
-        logger.debug("no JSON object found in model output")
+        _refuse("no JSON object found in model output", failure_reason)
         return None
     try:
         payload = json.loads(payload_text)
     except json.JSONDecodeError as exc:
-        logger.debug("model output is not valid JSON: %s", exc)
+        _refuse(f"model output is not valid JSON: {exc}", failure_reason)
         return None
     if not isinstance(payload, dict):
-        logger.debug("model output JSON is not an object")
+        _refuse("model output JSON is not an object", failure_reason)
         return None
 
     # Tolerate the two most common schema slips before validation: a severity that
@@ -551,19 +568,20 @@ def parse_assessment(
     try:
         assessment = RiskAssessment.model_validate(payload)
     except ValidationError as exc:
-        logger.debug("model output failed schema validation: %s", exc.errors()[:2])
+        _refuse(f"model output failed schema validation: {exc.errors()[:2]}", failure_reason)
         return None
 
     if expected_label is not None and str(assessment.label) != expected_label:
-        logger.debug(
-            "model answered label %s but %s was requested", assessment.label, expected_label
+        _refuse(
+            f"model answered label {assessment.label} but {expected_label} was requested",
+            failure_reason,
         )
         return None
     if expected_horizon_days is not None and assessment.horizon_days != expected_horizon_days:
-        logger.debug(
-            "model answered horizon %d but %d was requested",
-            assessment.horizon_days,
-            expected_horizon_days,
+        _refuse(
+            f"model answered horizon {assessment.horizon_days} but "
+            f"{expected_horizon_days} was requested",
+            failure_reason,
         )
         return None
     return assessment

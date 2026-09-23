@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import platform
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -100,6 +101,26 @@ PATH_STRUCTURED = "structured"
 PATH_TEXT = "text_baseline"
 PATH_FUSED = "fused"
 PATH_ORDER: tuple[str, ...] = (PATH_STRUCTURED, PATH_TEXT, PATH_FUSED)
+
+#: A structured model restricted to the signals the text track's prompt actually shows.
+#:
+#: The LoRA prompt carries :data:`PROMPT_SIGNAL_COLUMNS`, so its score is produced from
+#: text *and* a dozen structured signals. Subtracting it from :data:`PATH_STRUCTURED`
+#: (the full feature set) measures the gap between two information sets as well as two
+#: models, and the resulting number cannot be read as "what the text added". This fourth
+#: path is the baseline that makes the subtraction mean one thing.
+PATH_MATCHED = "structured_matched"
+
+#: Rows the comparison table prints, in reading order. The matched baseline sits second:
+#: directly below the path it shadows and directly above the text path it is the control
+#: for, because those are the two subtractions a reader is meant to make.
+#:
+#: It is deliberately *not* in :data:`PATH_ORDER`. That tuple is the list of **tracks** —
+#: it decides which reports get fitted, which score columns are written onto the panel, and
+#: which two series the fusion stacks. The matched baseline is a control, not a track: it
+#: has no fusion of its own, and nothing about it should reach the panel. Three tracks,
+#: four comparison rows.
+COMPARISON_ORDER: tuple[str, ...] = (PATH_STRUCTURED, PATH_MATCHED, PATH_TEXT, PATH_FUSED)
 
 #: The continuous forward quantity the information coefficient is computed against,
 #: per label, with the sign that makes "larger means more risk".
@@ -184,23 +205,34 @@ def label_split_frames(panel: pd.DataFrame, label: str) -> dict[str, pd.DataFram
     return frames
 
 
-def text_inputs(panel: pd.DataFrame, result: BuildResult, config: ProjectConfig) -> pd.Series:
+def text_inputs(
+    panel: pd.DataFrame, result: BuildResult, config: ProjectConfig, label: str
+) -> pd.Series:
     """Render the text the LoRA sees, so the bag-of-words baseline sees the same thing.
 
     The baseline's job is to answer "does the fine-tuned LLM beat TF-IDF on the same
     input?". Feeding it anything other than the identical prompt would make the
     comparison depend on the difference between two inputs as well as two models.
 
+    ``label`` is required rather than defaulted. The prompt states the question it is
+    asking (``<TASK>label=... horizon_days=...</TASK>``), so a row scored against
+    ``tail_risk`` whose prompt asks about ``default_risk`` is being measured on a
+    question it was never asked. Until this argument existed the function hard-coded
+    ``default_risk`` and was called once per run from outside the label loop, which
+    put that wrong task tag in front of every label except the first.
+
     Args:
         panel: The assembled panel.
         result: The build result, for ``text_context``.
         config: Project configuration, for the token budget.
+        label: The label the prompt is written for. Must be the same label the
+            resulting scores are compared against.
 
     Returns:
         One rendered user prompt per panel row, aligned to ``panel.index``.
     """
     budget = chars_budget_for_seqlength(config)
-    contexts = build_prompt_contexts(panel, result, config, "default_risk", budget)
+    contexts = build_prompt_contexts(panel, result, config, label, budget)
     rendered = pd.Series("", index=panel.index, dtype=object)
     for position, context in contexts.items():
         rendered.iloc[position] = build_user_prompt(context)
@@ -540,6 +572,11 @@ class LabelOutcome:
     label: str
     fitted: bool
     reason: str = ""
+    #: Why the matched-information control row is missing from the comparison table, when
+    #: it is. Empty means the row was produced. Recorded rather than swallowed: a table
+    #: that is quietly missing its control still reads as a complete comparison, and the
+    #: reader then makes the subtraction against the wrong baseline.
+    matched_reason: str = ""
     n_train: int = 0
     n_valid: int = 0
     n_test: int = 0
@@ -692,11 +729,38 @@ def evaluate_label(
         dates=scores["as_of"],
     )
 
+    # The matched-information control. Fitted here, in the one place that produces the
+    # standard report, rather than left to a caller: `text_only_lora - structured_matched`
+    # is the subtraction that means "what the text added", and a report that ships without
+    # the control invites the reader to subtract against `structured` instead — the
+    # mismatched comparison the control exists to prevent.
+    matched_scores: pd.Series | None = None
+    try:
+        matched_scores = _matched_signal_scores(panel, config, label, PROMPT_SIGNAL_COLUMNS)
+    except ValueError as error:
+        # Not fatal: none of the three tracks depends on this control. Disclosed through
+        # the run's notes instead of dropped silently.
+        outcome.matched_reason = str(error)
+        logger.warning("%s: matched-information baseline not fitted. %s", label, error)
+    if matched_scores is not None:
+        # `matched_scores` is indexed by the panel's row labels, the same index `scores`
+        # was built with, so this aligns row-for-row rather than positionally.
+        scores[PATH_MATCHED] = matched_scores
+
     for path in PATH_ORDER:
         outcome.reports[path] = evaluate_classification(
             y_test,
             scores[path].to_numpy(),
             path=path,
+            label=label,
+            split="test",
+            calibration_bins=config.eval.n_bins,
+        )
+    if matched_scores is not None:
+        outcome.reports[PATH_MATCHED] = evaluate_classification(
+            y_test,
+            scores[PATH_MATCHED].to_numpy(),
+            path=PATH_MATCHED,
             label=label,
             split="test",
             calibration_bins=config.eval.n_bins,
@@ -753,12 +817,128 @@ def evaluate_label(
         outcome,
     )
     outcome.scores = scores
+    # `PATH_MATCHED` is deliberately absent. `shingan train structured` persists exactly
+    # what is in this dict, and the matched control is a measurement instrument, not a
+    # deliverable: shipping it would put a file on disk whose name implies it is a
+    # candidate model while its only defined use is to be subtracted from one.
     outcome.models = {
         PATH_STRUCTURED: structured,
         PATH_TEXT: baseline,
         PATH_FUSED: fusion,
     }
     return outcome
+
+
+def matched_signal_report(
+    panel: pd.DataFrame,
+    config: ProjectConfig,
+    label: str,
+    *,
+    signals: Sequence[str] = PROMPT_SIGNAL_COLUMNS,
+) -> tuple[ClassificationReport, pd.Series]:
+    """Fit a structured model on the signals the prompt shows, and score the test block.
+
+    Why this exists rather than "just compare against ``structured``": the text track's
+    prompt contains a structured-signal block, so the two paths being compared do not see
+    the same inputs. The difference between them therefore mixes the value of the text
+    with the value of the extra features, and a reader who subtracts them anyway gets a
+    number that looks like an answer and is not one.
+
+    Fitting the same estimator on the same dozen columns over the same splits, with the
+    same calibration fold, removes that mismatch: ``text_only_lora - structured_matched``
+    is now a difference between two models that were shown the same information.
+
+    Args:
+        panel: The assembled panel.
+        config: Project configuration; the structured block supplies the estimator.
+        label: Label to fit.
+        signals: Columns to use. Defaults to the prompt's own signal list; an explicit
+            list is accepted so a caller can ask "what if the prompt had held other
+            columns?" without editing the prompt.
+
+    Returns:
+        ``(report, scores)`` where ``scores`` is aligned to the test frame's index, so a
+        caller can pair it row-by-row with another path's scores.
+
+    Raises:
+        ValueError: If any requested signal is absent from the panel. Silently dropping
+            one would make the "same information" claim false while keeping the row.
+    """
+    scores = _matched_signal_scores(panel, config, label, signals)
+    frames = label_split_frames(panel, label)
+    y_test = frames["test"][f"label_{label}"].to_numpy(dtype=int)
+    report = evaluate_classification(
+        y_test,
+        scores.to_numpy(),
+        path=PATH_MATCHED,
+        label=label,
+        split="test",
+        # The same bin count every other row uses. The matched row is the one the LoRA row
+        # is subtracted from, so a different binning here would put two different ECEs in
+        # one table under two names that read as the same measurement.
+        calibration_bins=config.eval.n_bins,
+    )
+    return report, scores
+
+
+def _matched_signal_scores(
+    panel: pd.DataFrame,
+    config: ProjectConfig,
+    label: str,
+    signals: Sequence[str],
+) -> pd.Series:
+    """Fit the structured estimator on ``signals`` and score the test block.
+
+    Split out of :func:`matched_signal_report` so that :func:`evaluate_label` — which is
+    what writes the standard report — produces this row from the *same* code. Two
+    independent implementations of "the same baseline" would eventually disagree, and the
+    disagreement would be invisible: both rows are labelled ``structured_matched``, and
+    neither carries a version of the formula it used.
+
+    Args:
+        panel: The assembled panel.
+        config: Project configuration; the structured block supplies the estimator.
+        label: Label to fit.
+        signals: The columns to fit on. Not defaulted here on purpose — the caller states
+            which information set it is claiming, and the docstring above records why.
+
+    Returns:
+        Test-block scores, indexed by the panel's row labels so a caller can pair them
+        row-by-row with another path's scores.
+
+    Raises:
+        ValueError: If any requested signal is absent from the panel.
+    """
+    missing = [name for name in signals if name not in panel.columns]
+    if missing:
+        raise ValueError(
+            f"asked for the matched baseline on columns the panel does not have: {missing}. "
+            "The comparison against the LoRA row is only valid on the columns the prompt "
+            "actually shows, so this is refused rather than reduced to whatever is present."
+        )
+
+    frames = label_split_frames(panel, label)
+    y_train = frames["train"][f"label_{label}"].to_numpy(dtype=int)
+    y_valid = frames["valid"][f"label_{label}"].to_numpy(dtype=int)
+
+    weight_train = None
+    if config.structured.use_sample_weight and "sample_weight" in frames["train"].columns:
+        weight_train = frames["train"]["sample_weight"].to_numpy(dtype=float)
+
+    columns = list(signals)
+    model = StructuredRiskModel(config.structured)
+    model.fit(
+        frames["train"][columns],
+        y_train,
+        frames["valid"][columns],
+        y_valid,
+        sample_weight=weight_train,
+    )
+    return pd.Series(
+        model.predict_proba(frames["test"][columns]),
+        index=frames["test"].index,
+        name=PATH_MATCHED,
+    )
 
 
 def _information_coefficient(
@@ -789,7 +969,11 @@ def _comparison_table(outcome: LabelOutcome, config: ProjectConfig) -> pd.DataFr
     # reader (or a type checker) know the two calls return the same object.
     headline_report = outcome.headline()
     gates = headline_report.gates() if headline_report else {}
-    for path in PATH_ORDER:
+    # `COMPARISON_ORDER`, not `PATH_ORDER`: the table carries a row per path *and* the
+    # matched-information control. `reports.get` still guards the row, so a label whose
+    # control could not be fitted shows three rows and says why in the run's notes rather
+    # than printing a row of NaNs under a name that claims to be a baseline.
+    for path in COMPARISON_ORDER:
         report = outcome.reports.get(path)
         if report is None:
             continue
@@ -801,6 +985,14 @@ def _comparison_table(outcome: LabelOutcome, config: ProjectConfig) -> pd.DataFr
             "base_rate": report.base_rate,
             "auc": auc,
             "ks": report.ks,
+            # `ks_statistic` takes an absolute gap, so a path whose negatives outrank its
+            # positives shows a large KS over an inverted ranking. The real-data run of
+            # 2026-09-23 produced exactly that (`text_baseline`: AUC 0.3281 with KS
+            # 0.5692), and without this column the two numbers read as if they corroborated
+            # each other. `ks_direction` is computed for every path already; `eval lora`
+            # has been shipping it since it was written, so dropping it here made the
+            # standard report the less honest of the two renderings.
+            "ks_direction": report.ks_direction,
             "pr_auc": pr_auc,
             "pr_auc_lift": report.pr_auc_lift,
             "capture_top5": report.capture_top5,
@@ -974,8 +1166,6 @@ def run_pipeline(
             "no feature columns were selected. Check structured.feature_groups in the "
             "configuration and that the builder produced those columns."
         )
-    text = text_inputs(panel, build, config)
-
     # Score columns are added to the panel before any per-label work so that the
     # rolling and stress sections, which read the panel rather than the test slice,
     # find them. NaN outside the test block is the correct state: those rows were not
@@ -986,6 +1176,11 @@ def run_pipeline(
 
     outcomes: dict[str, LabelOutcome] = {}
     for label in wanted:
+        # Rendered inside the loop rather than once for the whole run. The prompt
+        # carries the question it asks, so handing the text track for `tail_risk`
+        # the prompt written for `default_risk` measures it on the wrong question —
+        # and does so silently, because both are just strings.
+        text = text_inputs(panel, build, config, label)
         outcome = evaluate_label(
             panel,
             config,
@@ -1026,6 +1221,17 @@ def run_pipeline(
         result = _run_rolling(panel, label, f"score_{PATH_FUSED}_{label}", config)
         if result is not None:
             stability[label] = result
+
+    # A comparison table that is missing its matched-information control must say so.
+    # Three rows under the ordinary headings look exactly like a complete comparison, and
+    # the reader's next move — subtracting the text path from `structured` — is then the
+    # mismatched subtraction the control exists to replace.
+    for label, outcome in outcomes.items():
+        if outcome.matched_reason:
+            notes.append(
+                f"{label}: the comparison table has no '{PATH_MATCHED}' row. "
+                f"{outcome.matched_reason}"
+            )
 
     drift = _run_drift(panel, outcomes, features)
     stress = _run_stress(panel, outcomes, config)
@@ -1555,6 +1761,7 @@ __all__ = [
     "MIN_QUOTE_CHARS",
     "NON_FEATURE_COLUMNS",
     "PATH_FUSED",
+    "PATH_MATCHED",
     "PATH_ORDER",
     "PATH_STRUCTURED",
     "PATH_TEXT",
@@ -1570,6 +1777,7 @@ __all__ = [
     "environment_snapshot",
     "evaluate_label",
     "label_split_frames",
+    "matched_signal_report",
     "run_pipeline",
     "select_feature_columns",
     "sft_examples",

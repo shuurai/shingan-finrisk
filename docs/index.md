@@ -28,6 +28,7 @@
 | [06 Windows 环境](06-windows-setup.md) | Windows 11 + RTX 5090 的逐步搭建、cu128 安装命令、验证脚本、`shingan doctor` 期望输出、WSL2 回退、排错表 | 要在这台机器上跑起来的人 |
 | [07 路线图](07-roadmap.md) | Stage 0-5 分阶段计划、每阶段的风险与推进条件 | 规划节奏的人 |
 | [08 命名决策](08-naming.md) | 四个候选名的比较、评分标准、Shingan 胜出理由、命名族、改名流程 | 关心命名与品牌一致性的人 |
+| [09 LoRA 评测接入](09-lora-evaluation.md) | 把已训好的适配器接进评测的**步骤日志**：目标、决策与理由、实际命令、产物、验证了什么与没验证什么 | 想知道"文本轨有没有增量"这个问题的答案从哪来的人 |
 | [ADR-0001](adr/0001-project-name.md) | 项目命名决策记录 | — |
 | [ADR-0002](adr/0002-training-stack-windows.md) | cu128/Blackwell 与训练栈选择（TRL+PEFT+bitsandbytes） | — |
 | [ADR-0003](adr/0003-dual-track-over-single-lora.md) | 为什么拒绝"单一 LoRA 吞下全部输入" | — |
@@ -40,6 +41,7 @@
 
 - `已实现·已验证` — 代码存在，且在合成数据上端到端跑通并有输出产物。
 - `已实现·未验证` — 代码存在，但**尚未**对真实数据或实时端点执行过，行为未经证实。
+- `已产出·不可引用` — 数字已经产出且可复算，但按本项目的门禁标准它**不能被引用为能力声明**（正样本太少，或该路是常量输出）。"有产物"与"能下结论"是两件事，这个状态专门用来分开它们。
 - `接口已定义·未验证` — live 端点适配器（网络调用）已写好，从未真正调用过成功路径。
 - `设计已定·未实现` — 设计在本套文档中已固定，代码尚未写。
 - `超出 POC 范围` — 有意不做。
@@ -55,12 +57,14 @@
 | 结构化轨（`models/structured.py`） | 已实现·已验证 | 合成数据可训练，validation fold 上做校准 |
 | 文本基线（`models/text_baseline.py`） | 已实现·已验证 | 词频/TF-IDF 类基线，供 text-only 一路对比 |
 | 评测指标与报告（`eval/metrics.py`、`report.py`） | 已实现·已验证 | 合成数据上有输出 |
-| SEC EDGAR 客户端（`data/edgar.py`） | 接口已定义·未验证 | 薄适配器；需 `User-Agent` 头，从未对 live EDGAR 跑过 |
-| 价格数据适配器（`data/prices.py`） | 接口已定义·未验证 | yfinance / Stooq 薄适配器，未对 live 端点验证 |
-| 新闻适配器（`data/news.py`） | 接口已定义·未验证 | FNSPID 为离线数据集，适配器未在真实快照上跑过 |
-| QLoRA 训练（`models/lora.py`） | 已实现·未验证 | 需 `train` extra 与 GPU；本机尚未产出过 checkpoint |
-| Fusion 层（`models/fusion.py`） | 已实现·未验证 | logistic stacker / rank-average，合成数据上可跑 |
-| 真实数据结果（AUC/KS/PR-AUC 等任何数字） | **不存在** | 仓库中没有任何真实数据评测结果 |
+| SEC EDGAR 客户端（`data/edgar.py`） | 已实现·已验证 | 已对 live EDGAR 跑通：`data/raw/real/` 下 filings 2,879 / fundamentals 2,189。踩过的坑是 **UA 里的联系邮箱域名**决定 200 还是 403，不是 UA 的形状 |
+| 价格数据适配器（`data/prices.py`） | 已实现·已验证 | 已对 live 端点跑通：prices 114,424 行 / 34 家公司 / 2010–2024（`scripts/fetch_real.py`） |
+| 新闻适配器（`data/news.py`） | 接口已定义·未验证 | FNSPID 是离线快照、未接入，所以真实面板上 `n_news_30d` / `sent_*` 全为零，`default_risk` 与 `fraud_risk` 无法评测 |
+| QLoRA 训练（`models/lora.py`） | 已实现·已验证 | `artifacts/lora/adapter/` 是真实底座（Qwen3-14B）跑通的 108 步 checkpoint。**但它的输出在同分布评测上是常量**（AUC 恰 0.5），因此证明的是链路可用，不是预测能力——见 [09](09-lora-evaluation.md) |
+| LoRA 推理与评测路径（`models/lora_inference.py`、`eval/lora.py`、`shingan eval lora`） | 已实现·已验证 | 训练输入的 prompt 被逐字节重建（260/260，`--verify-prompts`）；完整合成 test 块 64/64 解析成功 |
+| 同信息量基线 `structured_matched` | 已实现·已验证 | 标准报告自 2026-09-23 起有 4 行；`text_only_* − structured_matched` 才是文本增量，见 [05](05-evaluation.md) 第 5.1 节 |
+| Fusion 层（`models/fusion.py`） | 已实现·未验证 | logistic stacker / rank-average 可跑；真实 `tail_risk` 的 valid 折只有 **1 个正样本**，报告的融合增益区间跨零 |
+| 真实数据结果（AUC/KS/PR-AUC 等数字） | 已产出·不可引用 | `artifacts/reports/` 里有真实面板上的四行对比。test 块只有 **5 个正样本**，且 39 个可观测正样本里 29 个落在切分空档（[09](09-lora-evaluation.md) 第 7.3.2 节）。这些数字描述这份样本，不描述模型能力 |
 | 三个 in-scope 标签的真实事件标注 | 设计已定·未实现 | 需要评级历史、EDGAR 重述/执法、审计意见等数据源接入 |
 | `publish hf` 到 Hugging Face Hub | 已实现·未验证 | 命令存在，未推送过任何 artifact |
 | `liquidity_risk` / `event_driven_risk` / `macro_contagion_risk` | 超出 POC 范围 | 定义见[标注](03-labeling.md)，POC 不实现 |
@@ -69,4 +73,6 @@
 
 本仓库的合成数据 demo 只能证明**流水线可运行**——数据生成、as-of 检查、特征构造、两条轨训练、融合、切分、指标计算、报告渲染都接通了。它**不能**证明模型具有真实预测能力。合成数据里的信号是生成器人为植入的，指标高只反映实现与设计一致。
 
-真实数据结果目前不存在。EDGAR 客户端、价格与新闻适配器都是薄适配器，尚未对 live 端点验证过；在真实数据第一次跑通并有可复现报告之前，本套文档中出现的所有数字都应读作**目标值（target/gate）**，而不是达成值。
+真实数据结果**已经产出，但它读不出能力**。`artifacts/reports/` 里有真实面板（2,221 行 / 34 家公司 / 2010–2024）上的四行对比，EDGAR 与价格两条腿都已对 live 端点跑通并有落盘数据。但那个 test 块只有 **5 个正样本**，而且真实 `tail_risk` 的 39 个可观测正样本里有 **29 个落在切分的空档里**（2020 整年夹在 `valid` 与 `test` 之间，被排除的正是唯一出现系统性下跌的那一年）——详见 [09](09-lora-evaluation.md) 第 7.3.2 节。
+
+因此这套文档中出现的所有门槛值仍应读作**目标值（target/gate）**，而不是达成值；真实数据上的融合增益至今区间跨零。文本轨的贡献仍然是**未知**——同分布评测已证实那个适配器的输出是常量，而真正 text-only 的适配器与零样本基线都还不存在。

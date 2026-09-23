@@ -857,6 +857,19 @@ class EvaluationReport:
             lines.append("")
             lines.append(_frame_to_markdown(self.comparison))
             lines.append("")
+            # `ks` is a magnitude and `ks_direction` is a separate question, so the pair can
+            # disagree. Printing the magnitude alone let a wrong-signed KS read as a strong
+            # one; printing the pair without saying what each is trades that misread for
+            # another, so the sentence travels with the table.
+            lines.append(
+                "> `ks` is the largest gap between the two score CDFs and carries no "
+                "direction. `ks_direction` is the sign, taken from the mean score of each "
+                "class. A large `ks` with `negatives_higher` is an inverted score rather "
+                "than a strong one. The two answer different questions — a maximum versus "
+                "a pair of means — so they can disagree, and at the positive counts in this "
+                "report a disagreement describes the sample as much as the model."
+            )
+            lines.append("")
 
         if self.gates:
             lines.append("## 4. Acceptance gates: target vs achieved")

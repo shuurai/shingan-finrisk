@@ -212,22 +212,37 @@ def _package_versions(names: tuple[str, ...]) -> dict[str, str]:
 
 def _label_table(outcome: Any) -> Table:
     """Per-path metrics for one label, as the report presents them."""
+    from shingan.pipeline import COMPARISON_ORDER
+
     table = Table(title=f"{outcome.label}", title_justify="left", show_lines=False)
     table.add_column("path")
     table.add_column("AUC", justify="right")
     table.add_column("KS", justify="right")
+    table.add_column("KS dir", justify="right")
     table.add_column("PR-AUC", justify="right")
     table.add_column("base rate", justify="right")
     table.add_column("positives", justify="right")
 
     if not outcome.fitted:
-        table.add_row("[yellow]not evaluated[/yellow]", "", "", "", "", "")
+        table.add_row("[yellow]not evaluated[/yellow]", "", "", "", "", "", "")
         return table
-    for path, report in outcome.reports.items():
+    # `COMPARISON_ORDER`, not `outcome.reports.items()`. Dict order puts the matched
+    # control last — below the fused row, three rows away from the paths it is the control
+    # for — which is where a reader stops looking for a baseline. This also makes the
+    # console order the same as the comparison table in the JSON and Markdown artifacts;
+    # two renderings of one run that disagree on row order invite reading them as
+    # different tables. Any path outside the tuple still prints, at the end.
+    order = [path for path in COMPARISON_ORDER if path in outcome.reports]
+    order += [path for path in outcome.reports if path not in COMPARISON_ORDER]
+    for path in order:
+        report = outcome.reports[path]
         table.add_row(
             path,
             f"{report.auc:.4f}" if report.auc == report.auc else "undefined",
             f"{report.ks:.4f}" if report.ks == report.ks else "undefined",
+            # Beside the KS it belongs to, because the whole point of the pair is that a
+            # large KS with `negatives_higher` is a broken score, not a strong one.
+            report.ks_direction,
             f"{report.pr_auc:.4f}" if report.pr_auc == report.pr_auc else "undefined",
             f"{report.base_rate:.4f}",
             str(report.n_positives),
@@ -925,6 +940,399 @@ def eval_run(
 
     for name, path in written.items():
         console.print(f"wrote {name}: {path}")
+
+
+@eval_app.command("lora")
+def eval_lora(
+    adapter: Annotated[
+        Path, typer.Option("--adapter", help="Adapter directory written by `train lora`.")
+    ] = Path("artifacts/lora/adapter"),
+    config: ConfigOpt = None,
+    data_config: DataConfigOpt = None,
+    eval_config: EvalConfigOpt = None,
+    root: RootOpt = None,
+    label: Annotated[str, typer.Option("--label", help="Label to score.")] = "tail_risk",
+    split: Annotated[str, typer.Option("--split", help="test, valid or train.")] = "test",
+    limit: Annotated[
+        int | None, typer.Option("--limit", help="Score only the first N rows (a smoke run).")
+    ] = None,
+    out: Annotated[Path | None, typer.Option("--out", help="Directory for the artifact.")] = None,
+    max_new_tokens: Annotated[int, typer.Option("--max-new-tokens")] = 512,
+    batch_size: Annotated[int, typer.Option("--batch-size")] = 4,
+    temperature: Annotated[
+        float, typer.Option("--temperature", help="0 for greedy; anything else samples.")
+    ] = 0.0,
+    verify_prompts: Annotated[
+        bool,
+        typer.Option(
+            "--verify-prompts/--no-verify-prompts",
+            help="Refuse to score unless the rebuilt prompts match the SFT file byte for byte.",
+        ),
+    ] = True,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Build and check the prompts, loading no model.")
+    ] = False,
+    verbose: VerboseOpt = False,
+) -> None:
+    """Score the fine-tuned text track on one label and split, and write the artifact.
+
+    This is the command that answers the project's central question. Until it existed,
+    ``eval run`` fitted structured / TF-IDF / fusion and stopped, so no artifact in the
+    repository had ever scored the model the project exists to train.
+
+    Three properties are enforced rather than documented:
+
+    * **The prompts are the ones the adapter trained on.** They are rebuilt through the
+      same functions the data builder uses, then compared byte for byte against the SFT
+      file, which is a check that costs seconds and cannot run after the fact. The
+      alternative failure — scoring a model on inputs it never saw — is invisible in
+      every metric: it looks like a weak model.
+    * **Unparsed generations are disclosed, not filled in.** A row whose output has no
+      score is dropped, and the drop count and the number of dropped **positives** are
+      written next to the metrics. Filling a zero would assert the model called it
+      negative.
+    * **The row says what it is.** The prompt includes a twelve-column structured-signal
+      block, so ``text_only_lora`` is prompt-conditioned, not text-only, and is compared
+      against a matched baseline rather than against the full feature set.
+    """
+    _configure_logging(verbose)
+    project, paths = _load_stack(
+        config=config,
+        data_config=data_config,
+        eval_config=eval_config,
+        train_config=None,
+        root=root,
+    )
+
+    from datetime import UTC, datetime
+
+    from shingan.data.builder import PROMPT_SIGNAL_COLUMNS, build_panel
+    from shingan.eval.lora import (
+        PATH_LORA,
+        PromptIntegrity,
+        build_payload,
+        compare_prompts,
+        paired_differences,
+        score_from_attempts,
+        write_artifact,
+    )
+    from shingan.models.lora import iter_jsonl
+    from shingan.pipeline import (
+        PATH_FUSED,
+        PATH_MATCHED,
+        PATH_STRUCTURED,
+        PATH_TEXT,
+        build_prompt_contexts,
+        chars_budget_for_seqlength,
+        evaluate_label,
+        label_split_frames,
+        select_feature_columns,
+        text_inputs,
+    )
+    from shingan.prompts import build_chat_messages, build_user_prompt
+
+    if split not in {"train", "valid", "test"}:
+        _fail(f"unknown split {split!r}", hint="choose one of: train, valid, test")
+
+    build = build_panel(project, write=False)
+    panel = build.panel
+    frames = label_split_frames(panel, label)
+    target = frames[split]
+    if target.empty:
+        _fail(
+            f"the {split} block holds no observable rows for {label}",
+            hint="Check the label and the split definition in configs/default.yaml.",
+        )
+
+    budget = chars_budget_for_seqlength(project)
+    contexts = build_prompt_contexts(panel, build, project, label, budget)
+
+    # Sample ids are formed the same way the builder forms them, so the rebuilt prompts
+    # can be matched against the file training actually read. The key is the (id, label)
+    # pair: the SFT file holds one example per row *and* label, and the id alone repeats
+    # across them.
+    sample_ids = panel["ticker"].astype(str) + "-" + panel["as_of"].dt.strftime("%Y%m%d")
+    prompts_by_row = {
+        (str(sample_ids.iloc[position]), label): build_user_prompt(context)
+        for position, context in contexts.items()
+    }
+
+    integrity: PromptIntegrity | None = None
+    if verify_prompts:
+        records: list[dict[str, Any]] = []
+        for name in ("train", "valid"):
+            candidate = paths.processed / "sft" / f"{name}.jsonl"
+            if candidate.is_file():
+                records.extend(iter_jsonl(candidate))
+        if not records:
+            _fail(
+                "there is no SFT file to check the prompts against",
+                hint="Run `shingan data sft` first, or pass --no-verify-prompts to score "
+                "without the check (the resulting numbers would not be reproducible).",
+            )
+        integrity = compare_prompts(records, prompts_by_row)
+        if not integrity.ok:
+            _fail(
+                "the rebuilt prompts do not reproduce the SFT file: "
+                f"{integrity.n_matching}/{integrity.n_compared} matched, "
+                f"{integrity.n_rebuilt_missing} rows had no rebuilt prompt",
+                hint=(
+                    "Scoring would measure the model on inputs it was not trained on. "
+                    "Rebuild the SFT file (`shingan data sft`) with the same --data-config, "
+                    f"or inspect the mismatch: {json.dumps(integrity.examples[:2], default=str)}"
+                ),
+            )
+
+    positions = list(target.index)
+    truth = [int(value) for value in target[f"label_{label}"].to_numpy()]
+    if limit is not None:
+        positions, truth = positions[:limit], truth[:limit]
+    conversations = [build_chat_messages(contexts[position]) for position in positions]
+
+    console.print(
+        f"{split} block: {len(target)} observable rows for {label}, "
+        f"{int(sum(truth))} positive(s) in the scored subset ({len(positions)} rows)"
+    )
+    if integrity is not None:
+        console.print(
+            f"prompt check: {integrity.n_matching}/{integrity.n_compared} rows for {label} "
+            f"rebuilt byte-identically to the SFT file "
+            f"({integrity.n_scanned} records scanned, {integrity.n_other_label} for other labels)"
+        )
+
+    if dry_run:
+        lengths = sorted(len(prompt) for prompt in prompts_by_row.values())
+        console.print(
+            "dry run: prompts built and verified, no model loaded. "
+            f"length min/median/max = {lengths[0]}/{lengths[len(lengths) // 2]}/{lengths[-1]} chars; "
+            f"truncated {sum(int(c.truncated) for c in contexts.values())} of {len(contexts)}"
+        )
+        return
+
+    from shingan.models.lora_inference import (
+        MissingInferenceDependencies,
+        generate_texts,
+        load_for_inference,
+        score_generation,
+    )
+
+    try:
+        model, tokenizer, facts = load_for_inference(
+            adapter,
+            device_map="auto" if project.lora.device_map == "auto" else "none",
+            attn_implementation=project.lora.attn_implementation,
+            load_in_4bit=project.lora.load_in_4bit,
+            compute_dtype=project.lora.bnb_4bit_compute_dtype,
+        )
+    except MissingInferenceDependencies as exc:
+        _fail(str(exc))
+
+    outputs = generate_texts(
+        model,
+        tokenizer,
+        conversations,
+        max_new_tokens=max_new_tokens,
+        batch_size=batch_size,
+        temperature=temperature,
+        progress=verbose,
+    )
+    horizon = int(project.labels.horizon_days(label))
+    attempts = [
+        score_generation(text, expected_label=label, expected_horizon_days=horizon)
+        for text in outputs
+    ]
+    scored = score_from_attempts(
+        truth,
+        [attempt.score for attempt in attempts],
+        [attempt.reason for attempt in attempts],
+        label=label,
+        path=PATH_LORA,
+        split=split,
+    )
+
+    # Per-row predictions, so the aggregate metrics in the artifact can be recomputed
+    # rather than believed. The raw generation is capped: 492 rows of verbose output
+    # would otherwise dominate the file, and the cap is recorded per row.
+    raw_cap = 4000
+    predictions = [
+        {
+            "ticker": str(panel["ticker"].iloc[position]),
+            "as_of": str(panel["as_of"].iloc[position]),
+            "label": label,
+            "y_true": int(outcome_value),
+            "score": attempt.score,
+            "parsed": attempt.parsed,
+            "reason": attempt.reason,
+            "raw": text[:raw_cap],
+            "raw_truncated": len(text) > raw_cap,
+        }
+        for position, outcome_value, attempt, text in zip(
+            positions, truth, attempts, outputs, strict=True
+        )
+    ]
+
+    rows: list[dict[str, Any]] = []
+    differences: list[dict[str, Any]] = []
+    caveats: list[str] = []
+    if limit is None:
+        import pandas as pd
+
+        features = select_feature_columns(panel, project)
+        outcome = evaluate_label(
+            panel,
+            project,
+            label,
+            features,
+            text_inputs(panel, build, project, label),
+            n_boot=project.eval.rolling.bootstrap_samples,
+        )
+        if outcome.fitted:
+            # The matched control is read off the outcome rather than fitted again here.
+            # `evaluate_label` now produces it, so `eval run` publishes the same row; a
+            # second fit would put two values under one name in two artifacts that a
+            # reader is expected to compare.
+            matched_report = outcome.reports.get(PATH_MATCHED)
+            if matched_report is None:
+                caveats.append(
+                    "the matched-information baseline row is absent from this artifact: "
+                    f"{outcome.matched_reason or 'not fitted'}"
+                )
+            # Reading order, and the matched baseline sits second on purpose: it is the
+            # row the LoRA row is subtracted from, so it has to be adjacent to it.
+            for report in (
+                outcome.reports[PATH_STRUCTURED],
+                matched_report,
+                outcome.reports[PATH_TEXT],
+                outcome.reports[PATH_FUSED],
+            ):
+                if report is not None:
+                    rows.append(report.as_dict())
+
+            # Every arm on the same rows. The LoRA column is NaN wherever a generation
+            # failed to parse, and `paired_differences` drops those rows for all arms
+            # rather than comparing one arm on a subset of the other's rows.
+            arms: dict[str, Any] = {
+                "as_of": target["as_of"],
+                "y_true": target[f"label_{label}"].astype(int),
+                PATH_STRUCTURED: outcome.scores[PATH_STRUCTURED],
+                PATH_TEXT: outcome.scores[PATH_TEXT],
+                PATH_FUSED: outcome.scores[PATH_FUSED],
+                PATH_LORA: pd.Series(
+                    [attempt.score for attempt in attempts], index=positions, dtype="float64"
+                ),
+            }
+            # The text and structured baselines are always there. The matched control is
+            # listed first when it exists, because that is the subtraction that means
+            # "the text contribution" and the reading order should not bury it — and it is
+            # omitted rather than imputed when it does not, since a difference against an
+            # all-NaN arm would be reported as "not measured" beside two real ones.
+            baselines: list[str] = [PATH_TEXT, PATH_STRUCTURED]
+            if PATH_MATCHED in outcome.scores:
+                arms[PATH_MATCHED] = outcome.scores[PATH_MATCHED]
+                baselines.insert(0, PATH_MATCHED)
+            differences = paired_differences(
+                pd.DataFrame(arms),
+                candidate=PATH_LORA,
+                baselines=tuple(baselines),
+                n_boot=project.eval.rolling.bootstrap_samples,
+                block_days=project.labels.calendar_horizon_days(label),
+                alpha=1.0 - project.eval.rolling.confidence_level,
+                seed=project.project.seed,
+            )
+        else:
+            caveats.append(f"the baseline rows were not fitted: {outcome.reason}")
+    else:
+        caveats.append(
+            "--limit was used, so the baseline rows are omitted: they are measured on the "
+            "whole test block and mixing them with a prefix of it would compare different "
+            "row sets."
+        )
+    rows.append(scored.as_dict())
+
+    data_info = {
+        "sources": [str(source) for source in project.data.sources],
+        "is_synthetic": bool(panel["is_synthetic"].any())
+        if "is_synthetic" in panel.columns
+        else None,
+        "data_config": str(data_config) if data_config is not None else "base default overlay",
+        "n_panel_rows": len(panel),
+        "n_companies": panel["ticker"].nunique(),
+        "split_counts": {name: len(frame) for name, frame in frames.items()},
+    }
+    payload = build_payload(
+        label=label,
+        split=split,
+        rows=rows,
+        scored=scored,
+        adapter=facts.as_dict(),
+        generation={
+            "policy": "greedy" if temperature <= 0 else "sampled",
+            "temperature": temperature,
+            "max_new_tokens": max_new_tokens,
+            "batch_size": batch_size,
+        },
+        prompt={
+            "integrity": integrity.as_dict() if integrity is not None else {"checked": False},
+            "includes_structured_signals": True,
+            "structured_signals": list(PROMPT_SIGNAL_COLUMNS),
+            "chars_budget": budget,
+            "n_truncated": int(sum(int(context.truncated) for context in contexts.values())),
+        },
+        data=data_info,
+        split_definition=build.split_report.to_dict(),
+        predictions=predictions,
+        differences=differences,
+        caveats=caveats,
+    )
+
+    destination = (
+        out
+        if out is not None
+        else paths.artifacts / "lora-eval" / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    )
+    written = write_artifact(payload, destination)
+
+    table = Table(title=f"{label} / {split}", title_justify="left")
+    for column in ("path", "AUC", "KS", "PR-AUC", "positives", "n rows"):
+        table.add_column(column, justify="right" if column != "path" else "left")
+    for row in rows:
+        table.add_row(
+            str(row.get("path")),
+            _metric(row.get("auc")),
+            _metric(row.get("ks")),
+            _metric(row.get("pr_auc")),
+            str(row.get("n_positives", "?")),
+            str(row.get("n_rows", "?")),
+        )
+    console.print(table)
+    for item in differences:
+        label_pair = f"{item['a']} - {item['b']} ({item['metric']})"
+        if item.get("estimate") is None:
+            console.print(f"  {label_pair}: not measured — {item.get('note', '')}")
+        else:
+            console.print(
+                f"  {label_pair}: {item['estimate']:+.4f} "
+                f"[{item['ci_low']:+.4f}, {item['ci_high']:+.4f}]"
+                f", crosses zero: {item['crosses_zero']}"
+                + (f"  ({item['note']})" if item.get("note") else "")
+            )
+    console.print(
+        f"  parse: {scored.n_parsed}/{scored.n_attempted} usable "
+        f"(failure rate {scored.failure_rate:.4f}), dropped positives {scored.n_dropped_positives}"
+    )
+    if scored.n_dropped:
+        console.print(f"  [yellow]reasons:[/yellow] {scored.failure_reasons}")
+    for name, path in written.items():
+        console.print(f"wrote {name}: {path}")
+
+
+def _metric(value: Any) -> str:
+    """A metric for a terminal table: four decimals, or an explicit absence."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "not measured"
+    return "not measured" if not math.isfinite(number) else f"{number:.4f}"
 
 
 @eval_app.command("report")
