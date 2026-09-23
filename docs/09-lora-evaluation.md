@@ -276,8 +276,10 @@
 3. **打乱文本的 placebo 对照**：ADR-0003 明确要求。
 4. **P0 溯源缺口（5 项）**：`run.json` 不含语料溯源（无 source / panel 路径 / 哈希 / `is_synthetic`）；`sft/manifest.json` 同样无 `is_synthetic`；模型卡模板把数据源**硬编码**在 `{{data_sources}}` 旁；模板要求合成训练必须标 `trained_on=synthetic` 但**没有对应占位符**；模板写 `warmup ratio {{warmup}}` 而实际产出的是 `warmup_steps=3`。
 5. **正样本扩容，但要先切分后扩池。** 真实面板 `tail_risk` 的 39 个可观测正样本里有 **29 个（74.4%）落在 `excluded` / `purged`**，且被排除的正是唯一有系统性下跌的 2020 年（见 **7.3.2**）。所以顺序是：先问能不能改切分几何把 2020 用上（同一份数据、同一套代码，滚动窗口已经覆盖它），再决定要不要为更大的股票池付 EDGAR 的下载成本。用 4 个正样本训 14B 只会学到恒定输出 0——**瓶颈是监督密度与切分几何，不是数据来源。**
-6. **`ks_direction` 没有进入对比表。** 真实运行的 `text_baseline` 出现 AUC 0.3281（排序反向）而 KS 0.5692，对比表只印 KS、不印方向；`metrics.ks_direction` 的 docstring 自己写着"reporting KS alone hides it"。见第 11 节。
+6. **`sample_id` 不是唯一键。** `sft_examples` 是每行 × 每标签一条样本，所以 `sample_id` 在三个标签之间重复；任何以它为行标识的下游工具都会把三条样本混成一条。提示词比对必须用 `(sample_id, label)`（本步第一版就踩了这个坑，被 `--verify-prompts` 抓出 260/782 的假不匹配）。尚未审查**其余**以 `sample_id` 为键的下游用途。
 7. **发布模型卡**：必须带 `trained_on=synthetic`，且 Evaluation 段写 `no real-data evaluation has been performed`；而这两条依赖待办 4 的模板修复。
+
+**已在第 11 节完成、不再挂在待办里的一项**：对比表只印 `ks` 不印方向。`ks_direction` 现在进入 `eval run` 的对比表（JSON / Markdown / 控制台三处），`report.py` 第 3 节加了说明；`tests/test_matched_in_report.py` 有 3 项守着。
 
 ## 9. 问题与答复（2026-09-23）
 
