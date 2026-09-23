@@ -328,7 +328,9 @@ def full_evaluation(y_true, y_pred, future_return=None):
 
 **`text_only_zero_shot` 与 `text_only_lora` 必须同一次跑出来。** 它们的价值是**差值**（微调买到了什么），而跨两次命令的两个数字不是一次配对测量。`shingan eval lora --mode both` 用同一份 base 权重、同一个 tokenizer、同一组 prompt 依次生成两臂，并把 `lora - zero_shot` 作为一条配对区间报出；`--mode zero_shot` 则只出零样本臂。两者都用 `structured_matched` 作为同信息量基线。
 
-**这一行当前的状态（2026-09-23）**：命令已存在，但在合成 test 块上**不可引用**——零样本臂 64 行里只有 4 行通过 schema 校验（失败率 0.9375），且这 4 行全是负样本（9 个正样本全部被丢弃），因此 AUC / PR-AUC 无从计算。失败原因是**指令契约缺口**而非模型能力：`SYSTEM_PROMPT` 没有枚举 `source_type` 的合法取值。详见 [09 LoRA 评测](09-lora-evaluation.md) 第 12 节。
+**这一行的状态（2026-09-23，同日两次）**：命令已存在；第一次跑出来时**不可引用**——零样本臂 64 行里只有 4 行通过 schema 校验（失败率 0.9375），且这 4 行全是负样本，9 个正样本全被丢弃，AUC / PR-AUC 无从计算。失败原因是**指令契约缺口**而非模型能力：`SYSTEM_PROMPT` 点了 `source_type` 的名，**却没有枚举它的合法取值**，模型只能去猜块名。
+
+缺口当天即修（补枚举 + 补 `source_ref` 的形状）、语料重生成、适配器重训，再跑一次：**两臂都 64/64 解析成功**，零样本 **AUC 0.5172 / KS 0.1273 / 方向 `positives_higher`**（表里唯一方向正确的一行），适配器仍是 **AUC 恰 0.5000 / KS 恰 0.0000** 的常量。于是 `lora − zero_shot` **第一次可测**：AUC −0.0172 [−0.2890, +0.0628]、PR-AUC −0.0169 [−0.1033, +0.0066]，**区间跨零**。可写的结论是“微调没有可测量的正增量，且把一个非退化排序变成了常量”；不可写“显著变差”。详见 [09 LoRA 评测](09-lora-evaluation.md) 第 12、13 节。
 
 这张表直接对应 `shingan eval compare --runs structured text fused`。
 

@@ -130,8 +130,10 @@ class EvidenceSpan(BaseModel):
 
     source_type: SourceType
     source_ref: str = Field(
-        description="Stable identifier, e.g. '10-K:JPM:2019-02-26:Item 1A' or "
-        "'news:reuters:2020-03-01:0'."
+        description="Identifier of the quoted document, e.g. '10-K:2019-02-26:Item 1A' "
+        "for a filing excerpt or 'news:reuters:2020-03-01' for a news item. These are "
+        "the shapes FilingExcerpt.source_ref and NewsItem.source_ref render, and the "
+        "shapes SYSTEM_PROMPT asks the model to reproduce."
     )
     quote: str = Field(min_length=1)
     section: str | None = None

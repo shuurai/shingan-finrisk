@@ -60,9 +60,9 @@
 | SEC EDGAR 客户端（`data/edgar.py`） | 已实现·已验证 | 已对 live EDGAR 跑通：`data/raw/real/` 下 filings 2,879 / fundamentals 2,189。踩过的坑是 **UA 里的联系邮箱域名**决定 200 还是 403，不是 UA 的形状 |
 | 价格数据适配器（`data/prices.py`） | 已实现·已验证 | 已对 live 端点跑通：prices 114,424 行 / 34 家公司 / 2010–2024（`scripts/fetch_real.py`） |
 | 新闻适配器（`data/news.py`） | 接口已定义·未验证 | FNSPID 是离线快照、未接入，所以真实面板上 `n_news_30d` / `sent_*` 全为零，`default_risk` 与 `fraud_risk` 无法评测 |
-| QLoRA 训练（`models/lora.py`） | 已实现·已验证 | `artifacts/lora/adapter/` 是真实底座（Qwen3-14B）跑通的 108 步 checkpoint。**但它的输出在同分布评测上是常量**（AUC 恰 0.5），因此证明的是链路可用，不是预测能力——见 [09](09-lora-evaluation.md) |
+| QLoRA 训练（`models/lora.py`） | 已实现·已验证 | `artifacts/lora-contract-v2/adapter/` 是**当前**适配器（Qwen3-14B、108 步 / 48:08、train_loss 0.3624，语料仍为合成数据）。`artifacts/lora/` 是**旧契约下**的 108 步适配器，原地保留，但 prompt 契约变更后它已被门禁**正确地**拒绝打分。**当前适配器的输出在同分布评测上是常量**（AUC 恰 0.5、KS 恰 0.0），因此证明的是链路可用，不是预测能力——见 [09](09-lora-evaluation.md) 第 13 节 |
 | LoRA 推理与评测路径（`models/lora_inference.py`、`eval/lora.py`、`shingan eval lora`） | 已实现·已验证 | 三档 `--mode`：`adapter`（默认，行为不变）/ `zero_shot` / `both`（同进程依次跑两臂，**差值才是配对测量**）。训练输入的 prompt 被逐字节重建（260/260 user 轮 **+ 782/782 system 轮**，`--verify-prompts`）；完整合成 test 块 64/64 解析成功 |
-| 零样本臂 `text_only_zero_shot`（`shingan eval lora --mode both`） | 已产出·不可引用 | 合成 test 块上 64 行只有 **4 行**通过 schema 校验（失败率 0.9375），且**9 个正样本全被丢弃** → AUC / PR-AUC 无从计算。失败原因是**指令契约缺口**（`SYSTEM_PROMPT` 未枚举 `source_type`）、不是模型能力。它是"根本没测到"，不是"测出没用"。真实数据上未跑——见 [09](09-lora-evaluation.md) 第 12 节 |
+| 零样本臂 `text_only_zero_shot`（`shingan eval lora --mode both`） | **已实现·已验证** | 两臂同进程配对。合成 test 块上 **64/64 解析成功**（失败率 0.0000），AUC 0.5172 / KS 0.1273 / 方向 `positives_higher`（表里唯一方向正确的一行）。命令与配对差值都能跑；**但这一行不能引作能力声明**，因为面板是合成的、文本信号是生成器植入的。真实数据上的零样本行见 [09](09-lora-evaluation.md) 第 13 节 |
 | 同信息量基线 `structured_matched` | 已实现·已验证 | 标准报告自 2026-09-23 起有 4 行；`text_only_* − structured_matched` 才是文本增量，见 [05](05-evaluation.md) 第 5.1 节 |
 | Fusion 层（`models/fusion.py`） | 已实现·未验证 | logistic stacker / rank-average 可跑；真实 `tail_risk` 的 valid 折只有 **1 个正样本**，报告的融合增益区间跨零 |
 | 真实数据结果（AUC/KS/PR-AUC 等数字） | 已产出·不可引用 | `artifacts/reports/` 里有真实面板上的四行对比。test 块只有 **5 个正样本**，且 39 个可观测正样本里 29 个落在切分空档（[09](09-lora-evaluation.md) 第 7.3.2 节）。这些数字描述这份样本，不描述模型能力 |
@@ -76,4 +76,4 @@
 
 真实数据结果**已经产出，但它读不出能力**。`artifacts/reports/` 里有真实面板（2,221 行 / 34 家公司 / 2010–2024）上的四行对比，EDGAR 与价格两条腿都已对 live 端点跑通并有落盘数据。但那个 test 块只有 **5 个正样本**，而且真实 `tail_risk` 的 39 个可观测正样本里有 **29 个落在切分的空档里**（2020 整年夹在 `valid` 与 `test` 之间，被排除的正是唯一出现系统性下跌的那一年）——详见 [09](09-lora-evaluation.md) 第 7.3.2 节。
 
-因此这套文档中出现的所有门槛值仍应读作**目标值（target/gate）**，而不是达成值；真实数据上的融合增益至今区间跨零。文本轨的贡献仍然是**未知**——同分布评测已证实那个适配器的输出是常量；零样本臂（基座模型不带适配器）**已经能跑**，但它在合成 test 块上的产出通不过 schema 校验（64 行只剩 4 行、9 个正样本全丢），所以它同样是"**没测到**"而不是"没用"；真正不带结构化信号的 text-only 适配器仍不存在。
+因此这套文档中出现的所有门槛值仍应读作**目标值（target/gate）**，而不是达成值；真实数据上的融合增益至今区间跨零。文本轨的贡献仍然是**未知**——同分布评测已证实那个适配器的输出是常量；零样本臂在修掉指令契约缺口后**已经能测且不是常量**（两臂都 64/64 解析），但它在合成面板上，所以读不出能力；真正不带结构化信号的 text-only 适配器仍不存在。

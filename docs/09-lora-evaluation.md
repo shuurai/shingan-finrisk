@@ -547,6 +547,13 @@
 
 **建议 A。** 理由不是省 GPU 而是**顺序**：B 的结果会被 A 推翻一次（修完契约后零样本臂会变），A 的结果不会被 B 推翻。B 唯一不可替代的价值是"真实数据上的实测失败分布"，而它现在属于诊断，不属于交付。
 
+**答复与执行（2026-09-23 下午）**：决定权被交回来后按 **A** 执行，并对 A 的步骤做了两处调整，两处都是为了"先证明再花钱"：
+
+1. **先量，再训。** 零样本臂**不使用适配器**，所以契约修好之后它立刻就可以测——重训对它毫无必要。因此顺序改成：修契约 → 用 `--mode zero_shot --limit 4`（约 1 分钟）证明解析率确实变了 → 才动语料与 GPU。原计划里的"修完直接重训 42 min"把一次一小时的赌注押在一个未经验证的假设上。
+2. **重训写到新目录**（`artifacts/lora-contract-v2/`，见 `train lora --output-dir`），不覆盖 `artifacts/lora/`。旧的 108 步适配器是一个真实跑通的产物，它"在旧契约下被训练过"这件事本身是记录的一部分；而且旧 SFT 在契约改动后**已不可复现**，所以语料也另存了一份（`data/processed/sft_v1_before_source_type_contract/`）。
+
+执行结果与新的两臂数字见下一节。
+
 ### 12.7 顺带修掉的一处配对缺陷：一个臂的失败不该缩短另一个臂的对比
 
 **发现方式**：`--mode both` 的**第一次**运行（`artifacts/lora-eval/20260923T080005Z`，已由下一步替换）把 `text_only_zero_shot` 和 `structured_matched` / `text_baseline` / `structured` 放在**同一组**基线上交给 `paired_differences`。结果是：Step 4 在 64 行上测出来的 `lora - structured_matched` 等**六项差值全部消失**，变成"not measured / n_rows=4"。
@@ -586,4 +593,153 @@
 
 **产物 schema 变化（需要知道，但不需要迁移）**：`adapter` 节更名为 `model`；`parse` 与 `predictions` 由单值变为按臂的映射。Step 2/4 的产物（`artifacts/lora-eval/20260923T062853Z`、`20260923T080005Z`）用的是旧 schema，它们作为当时的记录保留，不重写。
 
+## 13. Step 8 — 修指令契约（§12.6 的选项 A）
 
+### 13.1 这一步为什么存在
+
+承接 12.6。在那里把三个选项交回给你，答复是"按你认为对的做"，因此按 **A** 执行，但把 A 的两步**调了顺序**：**零样本臂不使用适配器**，所以契约一修好它就能测，重训对它毫无影响。原来的 A 是"修完直接重训 42 min"——那等于把一小时的赌注押在一个尚未验证的假设上。实际顺序是：修契约 → 花一分钟证明解析率真的变了 → 才动语料与 GPU。
+
+### 13.2 是两个缺口，不是一个
+
+`SYSTEM_PROMPT` 的 `evidence` 行原文是 `array of {source_type, source_ref, quote}`，而 `RiskAssessment` 对这两个字段的要求完全不同：
+
+- **`source_type` 是严格枚举**（`SourceType`：`filing` / `news` / `price` / `structured` / `other`）。prompt 只点了名、没给取值，模型只能猜——它猜的是 prompt 里唯一可见的分类法：**块名** `FILING_EXCERPTS` / `NEWS` / `STRUCTURED_SIGNALS`（一条还写成小写 `filing_excerpts`）。这就是 60/64 行被拒的全部原因。
+- **`source_ref` 是自由字符串，没有任何校验。** 它唯一一处说明写在 `EvidenceSpan.source_ref` 的 `Field(description=...)` 里，**而且写错了**：那里举的例子是 `10-K:JPM:2019-02-26:Item 1A` 与 `news:reuters:2020-03-01:0`，而代码里真正产出这个值的两处是 `FilingExcerpt.source_ref`（`doc_type:filed:section[:accession]`，**没有 ticker**）与 `NewsItem.source_ref`（`news:source:published`，**没有文章序号**）。
+
+第二个缺口不阻塞解析（自由字符串不会被拒），所以它更安静：模型可以编一个看起来很像的引用，而没有任何门会拦——`quotes_are_verbatim` 只校验 `quote`。**它不是本次的阻塞原因，但它是同一个病**：prompt 要求了一个它没有描述清楚的字段。
+
+### 13.3 改了什么
+
+| 位置 | 改动 |
+| --- | --- |
+| `prompts.SYSTEM_PROMPT` | 新增 `Each evidence object:` 段逐字段给出取值与形状；两个 `source_ref` 例子**照抄渲染器的实际产出**；Rules 增加两条（`source_type` 必须是那五个值之一；`source_ref` 必须指向 user request 里真实存在的文档） |
+| `data/schema.EvidenceSpan.source_ref` | `description` 更正为渲染器真实产出的形状，并注明它就是 `SYSTEM_PROMPT` 要求模型复现的东西 |
+| `tests/test_instruction_contract.py` | **新建**，见 13.11 |
+
+**没有放宽解析器。** 把块名映射成合法值仍然被拒绝——那等于替模型改作业（12.3 已立此口径）。这次修的是**契约**，不是验收标准。修完 `SYSTEM_PROMPT` 是 1,380 字符（原 864）。
+
+### 13.4 修的时候撞出来的第二个缺陷：预留额被自己的 prompt 撑破了
+
+`chars_budget_for_seq_length()` 是单一真相源：它把 `max_seq_length` 换成字符预算，并**预留** `PROMPT_OVERHEAD_CHARS` 给"system prompt + task 块 + 收尾标记"。预留额是 **1,500**。
+
+加上 `Each evidence object:` 段之后，真实脚手架是 **1,655 字符**（system prompt 1,380 + user 模板 227 + task 值 48）——**超出预留额 155 字符**。也就是说 `chars_budget_for_seq_length(4096)` 会把 13,245 个字符发给内容块，而窗口只装得下 14,745 字符等价的文本：**一个刚好用满预算的 prompt 会溢出 `max_seq_length`。**
+
+形状和 13.2 那个一样：**在任何指标里都不可见**，它表现为一次安静的溢出而不是一次报错。改法：预留额提到 **1,800**（约 150 字符余量），并用测试钉住不等式，副作用是内容预算 13,245 → **12,945**。
+
+**这个副作用在合成数据上是零，在真实数据上是 300 字符。** 合成语料 manifest 记着 `prompts_truncated: 0`（三个标签全 0），所以合成 SFT 的内容一个字都没变；真实面板则本来就有 2,140/2,221 条被裁（见 13.9）。13.8 的对照证实了这一点：四条拟合基线**逐位未变**。
+
+### 13.5 先量，再训
+
+| 阶段 | 命令 | 结果 |
+| --- | --- | --- |
+| 修之前（Step 7） | `eval lora --mode both --limit 4 --max-new-tokens 4096` | 零样本 **0/4**，原因 `source_type` 枚举不合法 |
+| 修之后 | `eval lora --mode zero_shot --limit 4 --max-new-tokens 4096` | 零样本 **4/4**，失败率 **0.0000** |
+
+解析率从 0 到 1 是**判定性**的：它证明缺口判断正确，而且证明它可以靠改一份 prompt 消除。此后才动语料和 GPU。
+
+### 13.6 门禁按设计响了，而且响得正好
+
+改完 prompt 第一次跑，`--verify-prompts` 报出：
+
+```
+prompt check: 260/260 user turns ... rebuilt byte-identically to the SFT file (782 records scanned, ...);
+system turn: 0/782 identical to the current SYSTEM_PROMPT
+```
+
+这**正是**应该发生的。改动只落在 system 轮，所以 user 轮仍 260/260 逐字节一致，而 system 轮 782/782 全不同——Step 7 补的那个 system 轮比对在这里第一次真正用上。没有它，这次输出会是"260/260 一切正常"，然后拿一个训练时没见过的契约去给适配器打分。
+
+同时它**没有中止**这个 run：零样本模式不评适配器，对 SFT 文件不构成任何授权（`uses_adapter = False`），报告行尾部带一句 `[not a gate: no adapter arm is scored]`。这是 Step 7 写下的行为，本次第一次被真实触发。
+
+**于是语料必须重生成。** `shingan data sft` 重跑后：切分计数完全不变（train 189/189/188、valid 72/72/72），`character_budget` 13,245 → **12,945**，重生成的 782 条 system 轮与当前 prompt **782/782 一致**（用独立脚本复核，不是只信门禁）。
+
+旧 SFT 在契约改动后**已不可复现**（生成它的 prompt 文本已不在代码里），所以另存一份：`data/processed/sft_v1_before_source_type_contract/`。
+
+### 13.7 重训，但写到新目录
+
+`train lora --output-dir artifacts/lora-contract-v2`，**不覆盖** `artifacts/lora/`。旧的 108 步适配器是一个真实跑通的产物，"它在旧契约下被训练过"本身就是记录的一部分；而且它现在被门禁**正确地**拒绝打分（13.6），覆盖它等于把"契约改动的代价"这件事一起删掉。
+
+| 项 | 值 |
+| --- | --- |
+| 步数 / 时长 | 108 步 / **48:08**（旧 run 42:18；本次与真实数据 dry-run 共用机器） |
+| train_loss | **0.3624**（旧 0.3658） |
+| 末轮 eval_loss / token 准确率 / 熵 | 0.1565 / 0.9518 / 0.1415 |
+| 语料 | 566 train / 216 valid（合成，与旧 run 同一批行） |
+| 环境 | 六个库版本与旧 run 相同，见 `run.json` |
+
+### 13.8 两臂结果：第一次有一个配对的"微调买到了什么"
+
+一次运行、一份 prompt 集、一个进程：`artifacts/lora-eval/20260923T094317Z`，64 行 / 9 正 / 4096 预算 / greedy / 16m10s。
+
+| path | role | AUC | KS | KS dir | PR-AUC | pos | n |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `structured` | baseline | 0.5434 | 0.2323 | `negatives_higher` | 0.1670 | 9 | 64 |
+| `structured_matched` | baseline | 0.5091 | 0.2727 | `negatives_higher` | 0.1492 | 9 | 64 |
+| `text_baseline` | baseline | 0.4424 | 0.3374 | `negatives_higher` | 0.2956 | 9 | 64 |
+| `fused` | baseline | 0.4525 | 0.3152 | `negatives_higher` | 0.1538 | 9 | 64 |
+| `text_only_zero_shot` | **arm** | **0.5172** | **0.1273** | **`positives_higher`** | 0.1575 | 9 | 64 |
+| `text_only_lora` | **arm** | **0.5000** | **0.0000** | `tied` | 0.1406 | 9 | 64 |
+
+解析账目：**两臂都是 64/64，失败率 0.0000、丢弃正样本 0**（Step 7 是 4/64、0.9375、9 个正样本全丢）。
+
+配对差值——前两行是这一步新产出的东西，此前无从计算：
+
+| 对比 | 指标 | 估计 | 95% CI | 跨零 |
+| --- | --- | --- | --- | --- |
+| `lora − zero_shot` | AUC | **−0.0172** | [−0.2890, +0.0628] | 是 |
+| `lora − zero_shot` | PR-AUC | **−0.0169** | [−0.1033, +0.0066] | 是 |
+| `zero_shot − structured_matched` | AUC | +0.0081 | [−0.1965, +0.2359] | 是 |
+| `zero_shot − structured_matched` | PR-AUC | +0.0083 | [−0.1661, +0.0680] | 是 |
+| `lora − structured_matched` | AUC | −0.0091 | [−0.2580, +0.1610] | 是 |
+| `lora − text_baseline` | AUC | +0.0576 | [−0.1776, +0.3022] | 是 |
+| `lora − structured` | AUC | −0.0434 | [−0.2536, +0.2390] | 是 |
+
+**三条与数字同现的事实：**
+
+1. **合成面板上的四条拟合基线逐位未变**（0.5434 / 0.5091 / 0.4424 / 0.4525，与 Step 7 完全相同）。这就是"预算从 13,245 降到 12,945 在这个面板上没有后果"的证据——对上了 manifest 的 `prompts_truncated: 0`。**这次改动只动了两个臂。**
+2. **适配器是表里唯一的常量。** KS 恰 0.0000、方向 `tied`、64 行同一个分数。零样本臂不是常量（KS 0.1273），而且它是**表里唯一方向为 `positives_higher` 的一行**——所有拟合基线（含 `text_baseline`）都是 `negatives_higher`。AUC 0.5172 的区间跨零，所以这**不是**"零样本更强"的结论；但它足以否定"基座模型只会输出一个数"，而那正是 Step 7 无法区分的事。
+3. **`lora − zero_shot` 的估计是负的**（AUC −0.0172、PR-AUC −0.0169），区间跨零。
+
+**所以 Step 7 那句"微调买到的是格式合规"要收窄。** 当时的证据是零样本通不过 schema；现在两臂都通过 schema，而**适配器那一行是常量**。收窄后的说法是：**在这份样本上，微调买到了格式合规，代价是排序能力**——后半句由第 2、3 条给出，且**不显著**（区间跨零），所以只能写成"没有可测量的正增量"，不能写成"显著变差"。
+
+### 13.9 真实数据上的零样本行（以及一次 VRAM 失败）
+
+目标：契约修好后，用**真实** SEC 文本验一次"契约修好了"能否外推。真实面板与合成面板有一个关键差别——**prompt 长度**：
+
+| 面板 | test 行 | 正样本 | 超预算被裁 | prompt 字符数 min / median / max |
+| --- | --- | --- | --- | --- |
+| 合成（`configs/default.yaml`） | 64 | 9 | **0 / 553** | 短（语料 manifest 记 `prompts_truncated: 0`） |
+| 真实（`configs/data/stage2_real.yaml`） | 492 | 5 | **2,140 / 2,221** | 392 / **13,084** / 13,084 |
+
+**第一次尝试（默认 `--batch-size 4`）在 37 分钟后 CUDA OOM：**
+
+```
+OutOfMemoryError: CUDA out of memory. Tried to allocate 7.30 GiB. GPU 0 has a total
+capacity of 31.84 GiB of which 0 bytes is free. Of the allocated memory 71.14 GiB is
+allocated by PyTorch, and 1.56 GiB is reserved by PyTorch but unallocated.
+```
+
+这**不是**"模型太大"：同一个 4-bit 14B 在合成面板上用同样的 batch 4 / 4096 token 完整跑过三次。差别在 **prefill 长度**——合成 prompt 很短，真实 prompt 中位数 13,084 字符（≈3,600 token，贴着 4096 上限），其上再叠 4,096 个生成 token；而长度分布**极不均匀**（392 到 13,084），碎片化是报错自己点出来的（建议 `expandable_segments:True`）。
+
+**这条失败本身就是本步的产出之一**：`--batch-size 4` 是这条路径的默认值，而它**只对短 prompt 成立**。在此之前没人量过长 prompt 推理的显存代价，因为唯一跑过的面板是短的。
+
+**改法**：`--batch-size 1` 加 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 重跑。注意 batch 4 → 1 会让这一步的墙钟时间大约翻数倍——真实数据上这条路径的成本此前也没有被量过。
+
+### 13.10 这一步没验证什么
+
+- **真实数据上的适配器臂没有跑。** 按 Step 5 的决定（正样本扩容之前不再为这个常量花 GPU），真实数据上只跑了零样本臂；它的两次尝试见 13.9。两臂的配对差值至今只在合成面板上成立。
+- **"契约修好了"只在解析率上验证，没有验证引用质量。** `source_ref` 仍然**没有任何门在校验**（13.2 的第二个缺口只被"写清楚了"，没有被"检查起来"）。模型现在知道该写什么形状，但没人核对它指的文档是否真的存在。
+- **`quote` 的逐字校验仍未在真实 EDGAR 文本上量过余量**（与 docs/04 第 5 节同一条）。
+- **合成数据上的结论不能外推到真实语料**，这个适配器仍然是在合成语料上训的（`sample_id` 形如 `SXAA-20100101`）。
+- **预算改动对真实面板的影响没有单独测量**：13.4 推出 12,945 会让真实 prompt 少 300 字符可用，而真实面板本来就有 96.3% 的 prompt 被裁——**"少 300 字符值多少"这件事没有被量化**，它只是被记录了下来。
+
+### 13.11 本步改了哪些文件
+
+| 文件 | 改动 |
+| --- | --- |
+| `prompts.py` | `SYSTEM_PROMPT` 增加 `Each evidence object:` 段与两条 Rules（1,380 字符）；`PROMPT_OVERHEAD_CHARS` 1,500 → **1,800**，附算术说明 |
+| `data/schema.py` | `EvidenceSpan.source_ref` 的 `description` 更正为渲染器真实产出的形状（原例子里的 ticker 与文章序号都是不存在的） |
+| `tests/test_instruction_contract.py` | **新建，9 项**：三个枚举与 prompt 的**相等**（一个测试覆盖两个方向）、evidence 三个键齐全、两个 `source_ref` 例子与渲染器一致、schema 描述与渲染器一致、预留额不等式、按预算填满的 prompt 不超 `max_seq_length`、**旧预留额确实会溢出** |
+| `docs/09-lora-evaluation.md` | 新增本节；12.6 记下选项 A 的答复与两处顺序调整 |
+| `docs/05-evaluation.md`、`docs/index.md`、`README.md`、`docs/04-training.md` | 状态与数字同步 |
+
+**制品**：`artifacts/lora-contract-v2/`（adapter sha256 `40b017bf1e09dba7…`）、`artifacts/lora-eval/20260923T094317Z`（两臂产物，含 system 轮 782/782 一致的门禁记录）、`data/processed/sft_v1_before_source_type_contract/`（旧语料存档）。旧的 `artifacts/lora/` **原地保留**。

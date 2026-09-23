@@ -286,8 +286,8 @@ shingan eval compare --runs structured text fused
 
 以下条目必须读作"未验证"，不得在对外材料中当作已完成工作：
 
-- **14B 训练已产出 checkpoint，但它证明的是链路，不是能力。** `artifacts/lora/adapter/`（Qwen3-14B、108 步、42:18、`run.json` 记下 `warmup_steps=3` 与六个训练库版本）是第 2.2 节配置**第一次被真实底座完整跑通**，因此该配置已不再是"未被验证"的状态。但它的语料来自 `configs/default.yaml` 的默认 `sources: [synthetic]`（`sample_id` 形如 `SXAA-20100101`），所以"训练链路在 32 GB 单卡上端到端可用"是事实，"训出了金融风险模型"不是。
-- **同分布评测显示这个 adapter 的输出是常量，不是"弱"。** `shingan eval lora` 在合成 test 块上得到 AUC **0.5000** / KS **0.0000**，64 行全部 `score: 0.0`、`severity` 全为 `low`、首个 `reasons` 模板只有一种。AUC 恰为 0.5 意味着该列不携带任何排序信息。**因此 `text_only_lora` 目前不能作为 Track B 的性能引用，也不能用来回答"文本有没有增量"。** 这与训练语料 566 行 / 18 正样本的算术一致：在低基率下最小化损失的最优解就是恒定输出。完整记录见 [09 LoRA 评测接入](09-lora-evaluation.md)。
+- **14B 训练已产出 checkpoint，但它证明的是链路，不是能力。** `artifacts/lora-contract-v2/adapter/`（Qwen3-14B、108 步、48:08、`run.json` 记下 `warmup_steps=3` 与六个训练库版本）是**当前**适配器；`artifacts/lora/` 是同日上午在**旧指令契约**下跑出的同规格 adapter，原地保留（它现在会被 `--verify-prompts` 拒绝打分，而那是**正确行为**而非损坏）。两个 adapter 的语料都来自 `configs/default.yaml` 的默认 `sources: [synthetic]`（`sample_id` 形如 `SXAA-20100101`），所以“训练链路在 32 GB 单卡上端到端可用”是事实，“训出了金融风险模型”不是。
+- **同分布评测显示这个 adapter 的输出是常量，不是“弱”。** `shingan eval lora` 在合成 test 块上得到 AUC **0.5000** / KS **0.0000**，64 行全部 `score: 0.0`、`severity` 全为 `low`。**而同一次运行里的零样本臂不是常量**（AUC 0.5172 / KS 0.1273，两臂都 64/64 解析），所以“基座模型只会输出一个数”已被排除。配对差值 `lora − zero_shot` 为负、**区间跨零**：可写“没有可测量的正增量”，不可写“显著变差”。该样本仍不能作为 Track B 的性能引用。完整记录见 [09 LoRA 评测接入](09-lora-evaluation.md)。
 - **合成数据上的"文本轨有增益"是生成器构造出来的**，不是实验发现。融合增益在合成数据上为正只说明实现与设计一致，不构成真实世界证据。
 - **文本基线（`text_baseline.py`）与 14B LoRA 的相对表现**：在合成数据上 TF-IDF 明显更好，因为 LoRA 那一列是常量；**在真实数据上仍是未知**——真实 `tail_risk` 的 train 切分只有 4 个正样本，训 14B 只会再学出一个常量。瓶颈是正样本数，不是数据 provenance。
 - **三个底座（8B / 14B / 30B-A3B）之间没有做过对比实验**，选型理由是显存与任务性质的推理，不是实测。

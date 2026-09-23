@@ -53,7 +53,16 @@ CHARS_PER_TOKEN = 3.6
 #: Fixed overhead reserved for the system prompt, the task block and the closing
 #: markers, so the budget arithmetic cannot produce a prompt that overflows simply
 #: because of the scaffolding around the content.
-PROMPT_OVERHEAD_CHARS = 1_500
+#:
+#: This was 1,500 until the instruction contract grew to enumerate ``source_type``
+#: and the evidence shapes: the true scaffolding is now 1,655 characters (a
+#: 1,380-character system prompt, the 227-character user template and the
+#: label/horizon values), so the old reserve no longer covered it and the budget
+#: began under-reserving — a prompt sized exactly to the budget would have overflowed
+#: ``max_seq_length``. 1,800 restores ~150 characters of slack.
+#: ``test_prompt_overhead_covers_the_real_scaffolding`` pins the inequality, because
+#: the failure mode is invisible: it shows up as a silent overflow, not as an error.
+PROMPT_OVERHEAD_CHARS = 1_800
 
 #: Sections that must be kept longest when trimming. Risk Factors and MD&A are
 #: where going-concern language, liquidity warnings and covenant discussion live.
@@ -77,11 +86,20 @@ Output exactly one JSON object with these keys:
   score        : float in [0, 1], your probability estimate
   horizon_days : integer, must equal the horizon stated in the user request
   reasons      : array of short strings
-  evidence     : array of {source_type, source_ref, quote}
+  evidence     : array of {source_type, source_ref, quote} objects
   catalysts    : array of short strings, optional
   limitations  : array of short strings, optional
 
+Each evidence object:
+  source_type : one of filing, news, price, structured, other
+  source_ref  : identifier of the quoted document, built from the block header it
+                came from in the user request — e.g. "10-K:2019-02-26:Item 1A" for
+                a filing excerpt, or "news:reuters:2020-03-01" for a news item
+  quote       : the passage, copied verbatim
+
 Rules:
+  - source_type must be one of the five values named above.
+  - source_ref must identify a document that appears in the user request.
   - Every quote must appear verbatim in the provided documents.
   - Do not use knowledge dated after <AS_OF>.
   - If the documents do not support an assessment, say so in reasons and use severity "low".
