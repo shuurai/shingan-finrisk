@@ -105,7 +105,7 @@
 | `bias` | `none` | — |
 | `learning_rate` | `1e-4` | 常用区间 1e-4 ~ 3e-5，取上界；若 loss 震荡则下调至 5e-5 |
 | `lr_scheduler_type` | `cosine` | — |
-| `warmup_ratio` | `0.03` | 3% warmup |
+| `warmup_ratio` | `0.03` | 3% warmup。`transformers` v5 已移除该键，运行时按本轮真实步数折算成 `warmup_steps`，见 2.6 |
 | `num_train_epochs` | `3` | 可按早停调整；小样本上超过 3 epoch 极易过拟合 |
 | `per_device_train_batch_size` | `1` | 受长序列限制 |
 | `gradient_accumulation_steps` | `16` | 有效 batch 16 |
@@ -216,6 +216,26 @@ the bank flagged higher provisions for credit losses ...
 | 路径长度 | 保持路径浅（MAX_PATH 260）。HF 快照路径很容易超限，建议把 `HF_HOME` 设在驱动器根下的短路径，并启用长路径支持 |
 | 无 `fcntl` / 无 `os.fork` | 任何依赖这两个模块的库（部分文件锁、部分 dataloader 库）在原生 Windows 上不可用。选依赖时先排除 |
 
+### 2.6 配置与训练器 API 的边界
+
+本项目的 YAML 描述**意图**，`transformers` / `trl` 的训练器参数描述**某一版的接口**。两者会分叉，而且分叉的方向代价最大：一个已经不存在的键会在构造 `SFTConfig` 时抛 `TypeError`，而那一步发生在底座模型**下载与量化之后**。
+
+这个坑踩过一次，代价是 2h05m 的下载换来一行报错：`transformers` v5 移除了 `warmup_ratio`，配置里还是旧键。因此现在的做法是：
+
+- **映射是纯函数。** `build_sft_config_kwargs()` 把 `lora` 配置块翻译成训练器参数，不导入 torch，所以"映射是否还在本机 API 之内"这件事可以在没装训练栈的机器上被测试（`tests/test_lora_arguments.py`）。
+- **校验在花钱之前。** `assert_trainer_arguments_supported()` 把映射结果与本机版本的签名逐键比对，不匹配则立即失败，并报出**所有**不认识的键与本机版本号。这一步和映射都在 `from_pretrained` 之前。
+- **`warmup_ratio` 留在 YAML，运行时折算成 `warmup_steps`。** 依据是本轮真实步数：566 条训练样本 / 有效 batch 16 → 36 步/epoch × 3 epoch = 108 步，`0.03 × 108 ≈ 3`。v5 之后预热只能用绝对步数表达，而把步数写死会在改 batch size 或 epoch 数时静默失真。
+- **`dtype` 按版本选名。** v5 把 `torch_dtype` 改名为 `dtype`，旧名保留为弃用别名：两个名字在 v5 都能加载，只有旧名在 v4 可用，所以解析不出版本时回退到旧名。
+- **`run.json` 记录真正传下去的参数与库版本。** 配置快照本身说明不了实际跑了什么——键会被翻译（`warmup_ratio` → `warmup_steps`），也可能被旧版本忽略。
+
+端到端验证（约一分钟，不需要 GPU，只下载几 MB 的 tiny 模型）：
+
+```powershell
+.venv\Scripts\python.exe scripts\smoke_train.py --keep
+```
+
+它以同族 tiny 模型跑完整条链路——配置合并 → 映射 → 训练器构造 → 一步优化 → 保存 adapter → `run.json`——并断言 `run.json` 里没有 `warmup_ratio`、有折算后的 `warmup_steps`、且有 adapter 权重。签名检查能挡住"键被移除"，只有这一步能挡住"键还在但语义变了"。
+
 ## 3. 训练流程与命令
 
 ```powershell
@@ -228,8 +248,8 @@ shingan data build --config configs/data/default.yaml
 # 3) 导出 SFT 指令 JSONL
 shingan data sft --out data/processed/sft --labels default_risk,fraud_risk,tail_risk
 
-# 4) 结构化轨（CPU 可跑）
-shingan train structured --label default_risk --config configs/train/structured.yaml
+# 4) 结构化轨（CPU 可跑）。注意它用 --config（基础配置），没有单独的 train 覆盖文件
+shingan train structured --label default_risk
 
 # 5) 文本轨（需要 train extra 与 GPU）
 shingan train lora --base Qwen/Qwen3-14B --config configs/train/qlora_14b.yaml
@@ -252,20 +272,21 @@ shingan eval compare --runs structured text fused
 | bitsandbytes 报 CUDA 版本不匹配，或 4-bit 加载时崩溃 | 装了 11.8–12.6 线的 wheel | 换 12.8–12.9 线的官方 Windows x86-64 wheel |
 | `ImportError: cannot import name 'flash_attn'` / 编译失败 | 试图在 Windows 上装 flash-attn | 不装。改用 `attn_implementation="sdpa"` |
 | Unsloth 首次运行报 Triton 相关错误 | 原生 Windows 无 Triton，Unsloth 的 fast path 依赖自定义 Triton kernel | 把 Unsloth 当可选加速器；不可用时走 TRL+PEFT+bitsandbytes。不要为它改核心流程 |
-| 训练 loss 一开始就是 `nan` | bf16 与部分 kernel 组合、lr 过高、或数据里有 NaN 目标 | 确认 `bf16=true` 且 `fp16=false`；lr 降到 5e-5；检查 SFT JSONL 的 JSON 可解析性 |
-| valid loss 单调上升、train loss 下降 | 小样本过拟合 | 减到 2 epoch、`lora_dropout` 提到 0.1、或减 `lora_r` 到 16 |
+| 训练 loss 一开始就是 `nan` | bf16 与部分 kernel 组合、lr 过高、或数据里有 NaN 目标 | 确认 `bf16=true` 且 `fp16=false`；lr 降到 5e-5；检查 SFT JSONL 的 JSON 可解析性 || valid loss 单调上升、train loss 下降 | 小样本过拟合 | 减到 2 epoch、`lora_dropout` 提到 0.1、或减 `lora_r` 到 16 |
 | valid 指标剧烈波动 | 事件稀有导致 valid 正样本只有个位数 | 这是本质困难，不是 bug。改用更长的 valid 区间，并依赖滚动评估（见[评测](05-evaluation.md)的陷阱 1）而非单点指标 |
 | `DataLoader` 抛 pickle/spawn 相关错误 | `num_workers > 0` | 设 `dataloader_num_workers=0` |
 | 读 JSONL 时 `UnicodeDecodeError` | 未指定编码 | 显式 `encoding="utf-8"` |
 | `OSError: [Errno 206] Filename too long` | HF 缓存路径超 MAX_PATH | 启用长路径，或把 `HF_HOME` 移到短路径 |
 | 报告里的 `quote` 校验全部失败 | CRLF/LF 不一致导致子串不匹配 | 规范化文本行尾后再做 `in` 校验；`.gitattributes` 统一 LF |
 | 校准后的概率系统性偏高 | 负样本下采样后未回填 `sample_weight` | 检查 `sample_weight` 是否传入训练与校准；评估集必须不降采样 |
+| 构造 `SFTConfig` 报 `TypeError: unexpected keyword argument 'warmup_ratio'` | `transformers` v5 移除了 `warmup_ratio`，YAML 里仍是旧键 | 已修：运行时折算为 `warmup_steps`（见 2.6）。同类错误现在会在**下载模型之前**被 `assert_trainer_arguments_supported` 拦下，并列出所有不认识的键 |
+| 参数错误发生在模型下载/量化**之后** | 参数校验曾经位于 `from_pretrained` 之后 | 校验已前置到模型加载之前。用 `python scripts/smoke_train.py` 在约一分钟内复现整条链路 |
 
 ## 5. 尚未验证的部分
 
 以下条目必须读作"未验证"，不得在对外材料中当作已完成工作：
 
-- **QLoRA 训练在本机（RTX 5090 / Windows 11）尚未产出过任何 checkpoint**。`train` extra 的安装路径与 `models/lora.py` 的配置在文档层面固定，但从未端到端执行成功。
+- **14B 真实训练尚未产出过 checkpoint。** 整条链路已用同族 tiny 模型端到端验证（`scripts/smoke_train.py`：配置 → 映射 → 训练器 → 一步优化 → adapter → `run.json`），真实底座的上一轮运行在"参数被本机 `transformers`/`trl` 接受"这一步因 `warmup_ratio` 中断，其后没有完成的运行。因此第 2.2 节的配置**没有被真实训练验证过**。
 - **合成数据上的"文本轨有增益"是生成器构造出来的**，不是实验发现。融合增益在合成数据上为正只说明实现与设计一致，不构成真实世界证据。
 - **文本基线（`text_baseline.py`）与 14B LoRA 的相对表现未知**。TF-IDF 基线是否已经足够，目前无法回答。
 - **三个底座（8B / 14B / 30B-A3B）之间没有做过对比实验**，选型理由是显存与任务性质的推理，不是实测。

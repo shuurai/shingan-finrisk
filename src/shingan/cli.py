@@ -801,6 +801,7 @@ def train_lora_command(
         INSTALL_HINT,
         LoraLeakageError,
         MissingTrainDependencies,
+        TrainingStackMismatch,
         train_lora,
     )
 
@@ -831,6 +832,10 @@ def train_lora_command(
         _fail("the training stack is not installed", hint=INSTALL_HINT)
     except LoraLeakageError as exc:
         _fail(str(exc))
+    except TrainingStackMismatch as exc:
+        # The message already names the offending keys, the installed versions and the
+        # reinstall command; a hint on top of it would be the same sentence twice.
+        _fail(str(exc))
 
     table = Table(title="LoRA run", title_justify="left")
     table.add_column("key")
@@ -845,9 +850,9 @@ def train_lora_command(
     for warning in result.warnings:
         console.print(Panel(warning, border_style="yellow", title="warning"))
     console.print(
-        "[yellow]The reported epoch-3 metrics are selection metrics[/yellow]: epoch 3 was "
-        "evaluated on the same fold it was selected on. Quote the held-out test block from "
-        "`shingan eval run` instead."
+        f"[yellow]The reported epoch-{project.lora.num_train_epochs} metrics are selection "
+        "metrics[/yellow]: that epoch was evaluated on the same fold it was selected on. "
+        "Quote the held-out test block from `shingan eval run` instead."
     )
 
 

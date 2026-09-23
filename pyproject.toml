@@ -59,14 +59,21 @@ dependencies = [
 # NOTE for Windows / RTX 5090 (Blackwell, sm_120): install torch from the cu128
 # index BEFORE this extra, otherwise pip resolves the CPU wheel. See docs/06-windows-setup.md.
 #   pip install torch --index-url https://download.pytorch.org/whl/cu128
+# Upper bounds on the training stack are deliberate, not habit. The trainer's argument
+# surface belongs to transformers/trl, so a major release can drop a key this project's
+# YAML still carries: `transformers` v5 removed `warmup_ratio`, and the symptom arrived
+# only after a 25 GB base-model download. `shingan.models.lora` now maps the config to
+# trainer arguments as a pure function and validates every key against the installed
+# signature *before* the model is loaded, but the cheapest fix is not to install an
+# unverified major at all. See docs/04-training.md section 2.6.
 train = [
   "torch>=2.7",
-  "transformers>=4.53",
-  "peft>=0.14",
-  "trl>=0.19",
-  "datasets>=3.2",
-  "accelerate>=1.4",
-  "bitsandbytes>=0.46",
+  "transformers>=4.53,<6",
+  "peft>=0.14,<1",
+  "trl>=0.19,<2",
+  "datasets>=3.2,<6",
+  "accelerate>=1.4,<2",
+  "bitsandbytes>=0.46,<1",
   "sentencepiece>=0.2",
   "protobuf>=5.27",
   "safetensors>=0.4",

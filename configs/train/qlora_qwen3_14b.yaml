@@ -63,6 +63,11 @@ lora:
   # -----------------------------------------------------------------------------------
   learning_rate: 0.0001
   lr_scheduler_type: cosine
+  # Kept as a ratio on purpose. `transformers` removed `warmup_ratio` in v5, so
+  # `shingan.models.lora` resolves it against the run's real length and passes
+  # `warmup_steps` to the trainer (docs/04-training.md section 2.6). Writing a step count
+  # here instead would silently stop matching the moment the batch size or the epoch
+  # count changes.
   warmup_ratio: 0.03
   num_train_epochs: 3
   per_device_train_batch_size: 1

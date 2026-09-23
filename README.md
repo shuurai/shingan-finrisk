@@ -1,8 +1,8 @@
 # Shingan 心眼
 
 [![ci](https://github.com/shuurai/shingan-finrisk/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/shuurai/shingan-finrisk/actions/workflows/ci.yml)
-![tests](https://img.shields.io/badge/tests-171%20passed-brightgreen)
-![coverage](https://img.shields.io/badge/coverage-36%25-yellow)
+![tests](https://img.shields.io/badge/tests-193%20passed-brightgreen)
+![coverage](https://img.shields.io/badge/coverage-37%25-yellow)
 ![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)
 ![license](https://img.shields.io/badge/license-Apache--2.0-blue)
 
@@ -26,7 +26,7 @@
 - **双轨架构**：Track A 是结构化信号上的校准梯度提升模型；Track B 是读取 SEC 文件与新闻的 QLoRA 指令微调模型；一层薄 fusion 融合两路。目标是在严格 point-in-time 纪律与 purge/embargo 时序验证下的排序质量与校准，**不是收益预测**。
 - **三个标签**：`default_risk`（评级下调/破产，365 天）、`fraud_risk`（重述/执法/非标审计意见，730 天）、`tail_risk`（30 交易日回撤劣于 −30%），均在同一套 as-of/无前视纪律下计算。
 - **硬性评测要求**：任何声称有效的模型必须同时给出 structured-only、text-only、fused 三路结果加无模型基线。
-- **当前状态**：流水线在合成数据上端到端可跑；Stage 2 已在真实数据（34 家公司、`tail_risk`、2221 行面板）上跑过一次——structured AUC 0.7686 / KS 0.5873 / PR-AUC 0.0258，但 test 块仅 5 个正样本，**不构成性能结论**；三路消融显示文本轨当前没有可度量的增量。QLoRA 训练正在进行中。
+- **当前状态**：流水线在合成数据上端到端可跑；Stage 2 已在真实数据（34 家公司、`tail_risk`、2221 行面板）上跑过一次——structured AUC 0.7686 / KS 0.5873 / PR-AUC 0.0258，但 test 块仅 5 个正样本，**不构成性能结论**；三路消融显示文本轨当前没有可度量的增量。QLoRA 训练**尚未产出 adapter**：真实运行在构造训练器时因 `transformers` v5 移除的键而中断，该问题已修，且参数现在会在加载模型之前被校验（[训练文档](docs/04-training.md)第 2.6 节）。
 - **已发布**：数据卡 [`shuurai2000/shingan-finrisk-labels`](https://huggingface.co/datasets/shuurai2000/shingan-finrisk-labels)（英文，0 占位符，全部为实测值）。
 - 设计文档在 [`docs/`](docs/)（中文），标注数据集卡模板在 [`templates/`](templates/)。
 
@@ -109,7 +109,7 @@ src/shingan/        the package: CLI, data, features, models, evaluation, report
   models/           structured (GBDT), text_baseline (TF-IDF), lora (QLoRA), fusion
   eval/             splits, purge/embargo, metrics, stability, stress tests, reporting
 configs/            data / train / eval YAML configs
-scripts/            platform wrapper scripts (bootstrap, run_poc) and docs
+scripts/            wrapper scripts (bootstrap, run_poc), the training-path pre-flight (smoke_train), and docs
 docs/               design docs (architecture, data, labelling, training, evaluation, Windows, roadmap, naming) — in Chinese
 templates/          Hugging Face model card / dataset card templates
 notebooks/          exploratory notebooks (outputs stripped by default)
@@ -146,10 +146,10 @@ python -m pytest -m "not network and not gpu and not slow" -q --cov=shingan
 
 | Metric | Value |
 | --- | --- |
-| Tests | **171 passing** |
-| Suite time | **~4 s** (tests only) |
-| Test files | 10 |
-| Skipped branches | the `network` / `gpu` / `slow` markers — no tests currently live under them |
+| Tests | **193 passing** |
+| Suite time | **~5 s** (tests only) |
+| Test files | 11 |
+| Skipped branches | the `network` / `gpu` / `slow` markers — no tests currently live under them. Two tests in `test_lora_arguments.py` skip themselves where the `train` extra is absent: they check the mapping against the *installed* trainer signature, which is the whole point of them |
 
 | File | Tests | Covers |
 | --- | --- | --- |
@@ -157,6 +157,7 @@ python -m pytest -m "not network and not gpu and not slow" -q --cov=shingan
 | [`tests/test_caveats.py`](tests/test_caveats.py) | 22 | missing-feature diagnostics, grouping by source, actionable advice, disclosure of years a window does not cover |
 | [`tests/test_models.py`](tests/test_models.py) | 22 | persistence contracts and round-trips for the three tracks, ablation-table completeness |
 | [`tests/test_sec_docs.py`](tests/test_sec_docs.py) | 22 | EDGAR archive URL assembly, UA validation, partial-write protection, resume |
+| [`tests/test_lora_arguments.py`](tests/test_lora_arguments.py) | 22 | config → trainer-argument mapping, `warmup_ratio` → `warmup_steps` translation, refusal of a key the installed trainer no longer accepts |
 | [`tests/test_text_features.py`](tests/test_text_features.py) | 15 | section splitting, heading recognition, empty document vs "no negative words" |
 | [`tests/test_publish_hf.py`](tests/test_publish_hf.py) | 11 | values injection, selective refusal, template-link integrity |
 | [`tests/test_report_gates.py`](tests/test_report_gates.py) | 11 | a gate row's target/achieved/verdict staying mutually consistent |
@@ -164,16 +165,17 @@ python -m pytest -m "not network and not gpu and not slow" -q --cov=shingan
 | [`tests/test_splits.py`](tests/test_splits.py) | 9 | purge / embargo, rolling-window usability |
 | [`tests/test_builder_text.py`](tests/test_builder_text.py) | 7 | panel assembly and text-column wiring |
 
-### Coverage: 36%, and it is not a threshold
+### Coverage: 37%, and it is not a threshold
 
 | Scope | Statement coverage |
 | --- | --- |
-| **Total** | **36%** (5,888 statements, 3,449 missed) |
+| **Total** | **37%** (5,944 statements, 3,457 missed) |
 | `models/persistence.py` | 100% |
 | `features/text.py` | 86% |
 | `models/fusion.py` / `models/text_baseline.py` | 79% |
 | `models/structured.py` | 72% |
 | `eval/metrics.py` | 49% |
+| `models/lora.py` | 32% (the argument mapping is pure and covered; the training loop needs the GPU) |
 | `cli.py` | 26% (publish and doctor paths covered) |
 | `data/prices.py` / `data/news.py` | 0% |
 
@@ -301,7 +303,7 @@ Status vocabulary:
 | SEC EDGAR client | Implemented · verified (submissions, companyfacts, full-text search and `/Archives` bodies all exercised on real data; the body corpus is ingested, see below) |
 | Price data adapter (yfinance / Stooq) | Implemented · verified (yfinance returned daily bars for 31/34 tickers) |
 | News adapter (FNSPID, offline dataset) | Interface defined · unverified |
-| QLoRA training | **First run in progress** — no completed adapter yet |
+| QLoRA training | **No completed adapter yet** — the real path is wired and smoke-verified end to end on a tiny model; no 14B run has finished |
 | Fusion layer | Implemented · verified (gain over structured-only on real data is **negative**) |
 | **Real-data result (Stage 2 / `tail_risk` / 34 companies / 2,221-row panel)** | **structured AUC 0.7686, KS 0.5873, PR-AUC 0.0258; text baseline 0.4074; fused 0.6554. Only 5 test positives — not a performance claim** |
 | Label review (all 39 `tail_risk` positives) | Implemented · verified (independent recomputation, disagreement 0.00%) |

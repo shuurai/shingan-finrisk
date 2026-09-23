@@ -1,12 +1,15 @@
 # scripts/
 
 Wrapper scripts for the two things you cannot do with a one-line `pip` command: set up an
-environment on Windows, and run the POC without remembering the argument order.
+environment on Windows, and run the POC without remembering the argument order. Plus one
+script that is not a wrapper: [`smoke_train.py`](#smoke_trainpy-does-the-training-path-still-run-on-this-machine),
+which runs the whole training path on a tiny model so a broken one is found in a minute
+rather than after a model download.
 
 They are thin. Every one of them ends up calling `python -m shingan`, and the command it
 ran is printed before it runs, so the script is never the only record of what happened.
 
-## The two scripts
+## The wrapper scripts
 
 | Script | What it does |
 | --- | --- |
@@ -29,6 +32,33 @@ powershell -ExecutionPolicy ByPass -File scripts\run_poc.ps1
 bash scripts/bootstrap.sh
 bash scripts/run_poc.sh
 ```
+
+## `smoke_train.py`: does the training path still run on this machine?
+
+Not a wrapper — a check. It is also the one script here with no PowerShell/POSIX pair,
+because it has no platform-specific work to do.
+
+```powershell
+.venv\Scripts\python.exe scripts\smoke_train.py --keep
+```
+
+The trainer's arguments belong to `transformers`/`trl`; this project's YAML belongs to us.
+When the two disagree, the error arrives at `SFTConfig(...)` — which in a real run happens
+*after* the base model has been downloaded and quantised. That cost one run: `transformers`
+v5 removed `warmup_ratio`, and the symptom was a `TypeError` 2h05m in.
+
+The script slices a few rows from the real SFT files, writes an overlay pointing at
+`trl-internal-testing/tiny-Qwen3ForCausalLM` (same model family as the base model, a few MB),
+and runs `python -m shingan train lora` on it: configuration merge → argument mapping →
+`SFTTrainer` → one optimiser step → adapter → `run.json`. About a minute, no GPU.
+
+It then checks the artifacts rather than the exit code — `run.json` must report
+`warmup_steps` and no `warmup_ratio`, the adapter weights must exist, and the training-stack
+versions must be recorded — because a run that trained nothing must not report success.
+`--keep` leaves the temporary directory in place for inspection.
+
+Reasoning and the class of bug this closes: section 2.6 of
+[`docs/04-training.md`](../docs/04-training.md).
 
 ## Make equivalence
 

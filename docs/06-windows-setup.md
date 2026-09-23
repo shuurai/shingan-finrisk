@@ -258,6 +258,12 @@ dataloader workers  0 (Windows default)         [ok]
 encoding            PYTHONUTF8=1                [ok]
 HF_HOME             D:\hf                       [ok]
 path length risk    low                         [ok]
+transformers        5.17.0                      [ok]
+peft                0.21.0                      [ok]
+trl                 1.13.0                      [ok]
+datasets            5.0.1                       [ok]
+accelerate          1.15.0                      [ok]
+bitsandbytes        0.50.2                      [ok]
 ────────────────────────────────────────────────────────────
 BLOCKING ISSUES     none
 WARNINGS            none
@@ -286,10 +292,22 @@ shingan demo
 
 `shingan demo` 是 CPU-only 的端到端运行，产出 `runs/<timestamp>-demo/report.md`。它验证的是**流水线连通性**（数据生成 → as-of 检查 → 特征 → 两条轨 → 融合 → 切分 → 指标 → 报告），不是预测能力。报告页首会标记数据来源为 synthetic。
 
-有 GPU 之后，跑最小的文本轨：
+### 5.1 训练链路的一分钟预检
+
+在把几小时 GPU 时间投进去之前，先验证"训练这条链路在本机能不能跑通"。它不需要 GPU：
 
 ```powershell
-shingan train lora --base Qwen/Qwen3-8B --config configs/train/qlora_smoke.yaml
+.venv\Scripts\python.exe scripts\smoke_train.py
+```
+
+它用与底座同族的 tiny 模型（`trl-internal-testing/tiny-Qwen3ForCausalLM`，几 MB）跑完整路径——配置合并 → 参数映射 → `SFTConfig`/`SFTTrainer` → 一步优化 → 保存 adapter → `run.json`——并检查产物齐备。要留下现场用 `--keep`。
+
+**为什么值得先花这一分钟。** 训练器的参数属于 `transformers` / `trl`，项目的 YAML 属于本项目，两者会分叉。分叉的表现是构造 `SFTConfig` 时抛 `TypeError`——而这一步在真实运行里发生在底座模型**下载与量化之后**。本机踩过一次：`transformers` v5 移除了 `warmup_ratio`，代价是 2h05m 下载换来一行报错。原理与修法见[训练](04-training.md)第 2.6 节。
+
+### 5.2 上 GPU 之后：先用 8B 走一遍
+
+```powershell
+shingan train lora --train-config configs/train/qlora_qwen3_14b.yaml --base Qwen/Qwen3-8B
 ```
 
 先跑 8B 而不是 14B：第一次跑 QLoRA 会依次暴露 cu128、bitsandbytes、序列长度、梯度检查点、DataLoader 这几类与模型规模无关的问题。用 8B 把这些环节过一遍，再换 14B，能把环境问题和配置问题分开定位。[训练](04-training.md) 第 2.1 节有完整理由。
