@@ -8,7 +8,7 @@ module (the CLI, the Hugging Face publisher, the model/dataset card templates)
 and a typo in a Hub repo id is only discovered after a failed upload.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 PROJECT_NAME = "shingan"
 PROJECT_DISPLAY_NAME = "Shingan"

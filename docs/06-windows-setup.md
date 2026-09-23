@@ -242,7 +242,7 @@ shingan doctor
 ────────────────────────────────────────────────────────────
 platform            Windows 11 (10.0.26100)  x86_64
 python              3.12.7
-package             shingan 0.1.0
+package             shingan 0.2.0
 torch               2.7.0+cu128                 [ok]
 torch.cuda build    12.8                        [ok]
 cuda available      True                        [ok]
