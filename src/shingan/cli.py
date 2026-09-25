@@ -1240,7 +1240,10 @@ def eval_lora(
             max_new_tokens=max_new_tokens,
             batch_size=batch_size,
             temperature=temperature,
-            progress=verbose,
+            # Always on: a multi-hour run with no progress line cannot tell a user
+            # "how much longer", which is how a healthy 14 tok/s decode gets mistaken
+            # for a hang. --verbose stays for per-row debug decisions.
+            progress=True,
         )
         attempts = [
             score_generation(text, expected_label=label, expected_horizon_days=horizon)

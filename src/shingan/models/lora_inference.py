@@ -33,6 +33,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -532,10 +533,16 @@ def generate_texts(
                 temperature=temperature,
                 pad_token_id=tokenizer.pad_token_id,
             )
+        batch_started = time.monotonic()
         outputs.extend(
             tokenizer.decode(row[prompt_length:], skip_special_tokens=True) for row in generated
         )
         if progress:
             done = min(start + batch_size, len(conversations))
-            logger.info("generated %d/%d", done, len(conversations))
+            logger.info(
+                "generated %d/%d (%.1fs this batch)",
+                done,
+                len(conversations),
+                time.monotonic() - batch_started,
+            )
     return outputs
