@@ -51,7 +51,7 @@ comply with each source's redistribution terms.
 | Rows | `{{n_rows}}` |
 | Companies | `{{n_companies}}` |
 | Date range | `{{date_range}}` |
-| Labels | 3 (`default_risk` / `fraud_risk` / `tail_risk`) |
+| Labels | `{{label_columns}}` |
 | Contains synthetic rows | `{{contains_synthetic}}` (share `{{synthetic_share}}`) |
 | License | Apache-2.0 (covers only the labels and derived features produced by this project; see Licensing) |
 | Project documentation | `{{repo_url}}/tree/main/docs` |
@@ -84,9 +84,9 @@ the project docs but are **not included in this dataset**.
 | Identifiers | `id`, `ticker`, `cik`, `company_name`, `sector` | `id` is `{ticker}-{as_of}`, unique across the table |
 | Time | `as_of` | The cut-off trading day for the row. Every feature was available at this point |
 | Split | `split` | `train` / `valid` / `test` / `purged`. `purged` rows were removed by the purge/embargo rules and are kept for auditability |
-| Labels | `labels.{default_risk,fraud_risk,tail_risk}` | 0/1 |
-| Label masks | `label_masks.*` | `false` means the label is undecidable for that row (window truncated by the right edge, or the event source does not cover it). Where the mask is `false`, the label value is meaningless |
-| Label metadata | `horizon_days.*`, `event_date.*`, `source_of_record.*` | `event_date` and `source_of_record` are for audit only and must **not** be used as model features |
+| Labels | `label_<name>` (e.g. `label_tail_risk`) | 0/1 |
+| Label masks | `label_mask_<name>` | `false` means the label is undecidable for that row (window truncated by the right edge, or the event source does not cover it). Where the mask is `false`, the label value is meaningless |
+| Label metadata | `horizon_days_<name>`, `event_date_<name>`, `source_of_record_<name>` | `event_date` and `source_of_record` are for audit only and must **not** be used as model features |
 | Forward quantities | `fwd_ret_21d`, `fwd_realized_vol_21d`, `fwd_max_drawdown_30d` | Continuous forward-looking quantities for IC and backtesting. Must **not** be used as model features |
 | Structured features | financial-ratio columns (about 13) | See the data dictionary in the project docs |
 | Structured features | technical / microstructure columns (about 20) | Same |
@@ -200,12 +200,12 @@ ds = load_dataset("{{dataset_repo}}", split="train")
 # Rare events: look at the base rate, not accuracy
 import numpy as np
 
-y = np.array(ds["labels.default_risk"])
+y = np.array(ds["label_tail_risk"])
 print("positive rate:", y.mean())
 
 # Evaluate only rows whose label mask is true, and never let downsampling
 # contaminate the evaluation set
-mask = np.array(ds["label_masks.default_risk"])
+mask = np.array(ds["label_mask_tail_risk"])
 y = y[mask]
 
 # Feature matrix: drop every label and forward-looking column

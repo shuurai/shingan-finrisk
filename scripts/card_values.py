@@ -146,6 +146,17 @@ def panel_values(panel_path: Path) -> dict[str, str]:
     values["rate_default"] = not_measured
     values["pos_fraud"] = not_measured
     values["rate_fraud"] = not_measured
+
+    # Which labels actually have columns in the panel. The template used to assert
+    # "Labels: 3" in prose while this same values file declared default/fraud
+    # unmeasured — a displayed value contradicting its own verdict, which this
+    # repository treats as a rendering bug wherever else it appears.
+    present = [name for name in ("default_risk", "fraud_risk", "tail_risk") if f"label_{name}" in df.columns]
+    absent = [name for name in ("default_risk", "fraud_risk", "tail_risk") if name not in present]
+    values["label_columns"] = (
+        f"{len(present)} label(s) with columns in the panel: {', '.join(present)}"
+        + (f"; no column for {', '.join(absent)} (event sources not connected)" if absent else "")
+    )
     return values
 
 

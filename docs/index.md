@@ -67,7 +67,7 @@
 | Fusion 层（`models/fusion.py`） | 已实现·未验证 | logistic stacker / rank-average 可跑；真实 `tail_risk` 的 valid 折只有 **1 个正样本**，报告的融合增益区间跨零 |
 | 真实数据结果（AUC/KS/PR-AUC 等数字） | 已产出·不可引用 | `artifacts/reports/` 里有真实面板上的四行对比。test 块只有 **5 个正样本**，且 39 个可观测正样本里 29 个落在切分空档（[09](09-lora-evaluation.md) 第 7.3.2 节）。这些数字描述这份样本，不描述模型能力 |
 | 三个 in-scope 标签的真实事件标注 | 设计已定·未实现 | 需要评级历史、EDGAR 重述/执法、审计意见等数据源接入 |
-| `publish hf` 到 Hugging Face Hub | 已实现·未验证 | 命令存在，未推送过任何 artifact |
+| `publish hf` 到 Hugging Face Hub | **已实现·已验证**（数据集部分） | 数据集卡 + `panel.parquet` 已发布至 `shuurai2000/shingan-finrisk-labels`，`load_dataset` 端到端验证通过（2221 行 / 68 列 / tail_risk 39 正样本，与卡片声明一致）。`--data-file` 上传前按卡片 `n_rows` 预检，矛盾则拒绝发布。模型卡仍有 61 个占位符（需适配器评测数字），按设计被门禁拦住 |
 | `liquidity_risk` / `event_driven_risk` / `macro_contagion_risk` | 超出 POC 范围 | 定义见[标注](03-labeling.md)，POC 不实现 |
 
 ### 诚实性声明

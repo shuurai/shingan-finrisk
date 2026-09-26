@@ -40,6 +40,10 @@ DATASET_VALUES: dict[str, str] = {
     "rate_fraud": "not measured (event source not connected)",
     "pos_tail": "39",
     "rate_tail": "1.76% of all rows (2.19% of the 1778 mask-true rows)",
+    "label_columns": (
+        "1 label(s) with columns in the panel: tail_risk; "
+        "no column for default_risk, fraud_risk (event sources not connected)"
+    ),
     "audit_sample_size": "1778",
     "audit_disagreement_rate": "0.00%",
     "market_cap_scope": "34 US large-caps; small-cap behaviour untested",
@@ -183,3 +187,80 @@ def test_only_rejects_an_unknown_target():
     result = runner.invoke(app, ["publish", "hf", "--only", "universe", "--dry-run"])
     assert result.exit_code == 1
     assert "unknown --only value" in _flat(result.output)
+
+
+# -- data files -----------------------------------------------------------------
+
+
+def _write_parquet(path: Path, n_rows: int) -> Path:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    pq.write_table(pa.table({"ticker": [f"T{i}" for i in range(n_rows)]}), path)
+    return path
+
+
+def test_a_data_file_matching_the_card_uploads_after_it(tmp_path, monkeypatch):
+    api = _install_fake_hub(monkeypatch)
+    values_file = _values_file(tmp_path, DATASET_VALUES)
+    panel = _write_parquet(tmp_path / "panel.parquet", int(DATASET_VALUES["n_rows"]))
+    result = runner.invoke(
+        app,
+        [
+            "publish", "hf", "--values-file", str(values_file),
+            "--only", "dataset", "--data-file", str(panel),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert api.upload_file.call_count == 2, "card first, then the data file"
+    card_call, file_call = api.upload_file.call_args_list
+    assert card_call.kwargs["path_in_repo"] == "README.md"
+    assert file_call.kwargs["path_in_repo"] == "panel.parquet"
+    assert file_call.kwargs["repo_type"] == "dataset"
+    assert "matches the card's n_rows" in _flat(result.output)
+
+
+def test_a_data_file_contradicting_the_card_refuses_before_any_upload(tmp_path, monkeypatch):
+    """A card saying 2221 rows next to a 3-row file is a published lie; catch it locally."""
+    api = _install_fake_hub(monkeypatch)
+    values_file = _values_file(tmp_path, DATASET_VALUES)
+    panel = _write_parquet(tmp_path / "panel.parquet", 3)
+    result = runner.invoke(
+        app,
+        [
+            "publish", "hf", "--values-file", str(values_file),
+            "--only", "dataset", "--data-file", str(panel),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "contradicts its card" in _flat(result.output)
+    assert api.upload_file.call_count == 0, "nothing may reach the network on a mismatch"
+
+
+def test_a_missing_data_file_refuses_before_anything_uploads(tmp_path, monkeypatch):
+    api = _install_fake_hub(monkeypatch)
+    values_file = _values_file(tmp_path, DATASET_VALUES)
+    result = runner.invoke(
+        app,
+        [
+            "publish", "hf", "--values-file", str(values_file),
+            "--only", "dataset", "--data-file", str(tmp_path / "nope.parquet"),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "--data-file not found" in _flat(result.output)
+    assert api.upload_file.call_count == 0
+
+
+def test_dry_run_reports_the_data_file_check_without_uploading(tmp_path):
+    values_file = _values_file(tmp_path, DATASET_VALUES)
+    panel = _write_parquet(tmp_path / "panel.parquet", 3)  # mismatched on purpose
+    result = runner.invoke(
+        app,
+        [
+            "publish", "hf", "--values-file", str(values_file),
+            "--only", "dataset", "--data-file", str(panel), "--dry-run",
+        ],
+    )
+    assert result.exit_code == 1, "the mismatch must surface in dry-run too"
+    assert "contradicts its card" in _flat(result.output)

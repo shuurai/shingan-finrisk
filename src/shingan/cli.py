@@ -1683,6 +1683,35 @@ def demo(
 # ---------------------------------------------------------------------------
 
 
+def _verify_data_file(path: Path, values: dict[str, Any]) -> str:
+    """Pre-flight one ``--data-file`` before any network call happens.
+
+    Returns a short description for the upload log. Raises ``ValueError`` on a
+    mismatch: a card that says one thing and a file that contains another is the
+    displayed-value-vs-verdict contradiction this repository refuses to publish,
+    and discovering it after the upload would mean republishing to fix it.
+
+    Reads the parquet footer metadata only — a multi-GB file costs nothing.
+    """
+    if not path.is_file():
+        raise ValueError(f"--data-file not found: {path}")
+    size = path.stat().st_size
+    n_rows = str(values.get("n_rows", ""))
+    if path.suffix == ".parquet" and n_rows.isdigit():
+        try:
+            import pyarrow.parquet as pq
+        except ImportError:  # pragma: no cover - parquet extra is a dev dependency
+            return f"{path.name}: {size:,} bytes (row count not checked: pyarrow missing)"
+        actual = pq.read_metadata(path).num_rows
+        if actual != int(n_rows):
+            raise ValueError(
+                f"{path} holds {actual} rows but the card says n_rows={n_rows}; "
+                "refusing to publish a dataset whose file contradicts its card"
+            )
+        return f"{path.name}: {actual} rows, {size:,} bytes (matches the card's n_rows)"
+    return f"{path.name}: {size:,} bytes"
+
+
 @publish_app.command("hf")
 def publish_hf(
     run_dir: Annotated[
@@ -1718,6 +1747,17 @@ def publish_hf(
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Render the cards and print the plan; upload nothing.")
     ] = False,
+    data_file: Annotated[
+        list[Path] | None,
+        typer.Option(
+            "--data-file",
+            help=(
+                "Data file to upload into the dataset repository, repeatable. Each file is "
+                "pre-flighted before anything is uploaded: a parquet whose row count "
+                "contradicts the card's n_rows refuses the whole publish."
+            ),
+        ),
+    ] = None,
     verbose: VerboseOpt = False,
 ) -> None:
     """Render the model and dataset cards, and upload them.
@@ -1821,6 +1861,16 @@ def publish_hf(
                 f"{', '.join(sorted(set(missing))[:8])}[/yellow]"
             )
 
+    # Pre-flight the data files before anything else: verification is local and
+    # cheap, and a card/file contradiction must stop the publish before the card
+    # upload, not after it.
+    data_files = list(data_file or [])
+    for candidate in data_files:
+        try:
+            console.print(f"data file: {_verify_data_file(candidate, values)}")
+        except ValueError as exc:
+            _fail(str(exc))
+
     if dry_run:
         console.print("[cyan]--dry-run: nothing was uploaded.[/cyan]")
         return
@@ -1875,6 +1925,16 @@ def publish_hf(
             commit_message=f"Shingan {__version__} dataset card",
         )
         uploaded.append(f"dataset card to {repo_dataset}")
+        for candidate in data_files:
+            api.upload_file(
+                path_or_fileobj=str(candidate),
+                path_in_repo=candidate.name,
+                repo_id=repo_dataset,
+                repo_type="dataset",
+                commit_message=f"Shingan {__version__} data file: {candidate.name}",
+            )
+        if data_files:
+            uploaded.append(f"{len(data_files)} data file(s) to {repo_dataset}")
     console.print(f"uploaded {', '.join(uploaded)}")
 
 

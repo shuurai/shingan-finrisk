@@ -12,6 +12,18 @@ The dataset schema and the label definitions are versioned separately via the
 ## [Unreleased]
 
 ### Added
+- `shingan publish hf --data-file` uploads data files into the dataset
+  repository alongside the card (repeatable). Every file is pre-flighted
+  locally before anything reaches the network: a parquet whose row count
+  contradicts the card's `n_rows` refuses the whole publish. The labelled
+  panel is now published to `shuurai2000/shingan-finrisk-labels` and verified
+  end to end with `load_dataset` (2,221 rows, tail_risk 39 positives in 1,778
+  mask-true rows — matching the card).
+- The dataset card's label inventory is now a rendered value
+  (`{{label_columns}}`, derived from the panel's actual label columns) instead
+  of a hardcoded "3 labels"; the fields table and the usage example name the
+  real flat columns (`label_tail_risk`, `label_mask_tail_risk`) rather than a
+  hierarchical naming the panel never used.
 - `shingan eval lora` accepts `--load-in-4bit/--no-load-in-4bit`, overriding the
   config default. Unquantised bf16 loading decodes several times faster than
   bitsandbytes 4-bit on Blackwell (the 4-bit decode kernels are unoptimised
