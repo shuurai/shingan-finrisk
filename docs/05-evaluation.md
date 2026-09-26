@@ -334,6 +334,8 @@ def full_evaluation(y_true, y_pred, future_return=None):
 
 **引用审计（2026-09-23 晚起每臂必带）**：`lora_eval.json` 新增 `citations` 段——每个 `source_ref` 被解析后与**该行 prompt 实际渲染出的文档**比对（冒号/空格归一化；`类型 日期`、含段落与 accession 的形态、`news:源:日期` 均可解析；光秃源名不可解析）。它是**披露不是 gate**：未解析引用不丢行、不扣分，但逐臂计数、逐行引用原文（`predictions[*].citations`）随产物走。引用"证据化"结论前先读这一行。一个已知的契约缺口会被它如实暴露：训练目标的新闻引用是光秃源名（`pipeline._sft_evidence`），与 prompt 教的形状不一致——修形状必须与下一次重训同批（[09 LoRA 评测](09-lora-evaluation.md) §14.5）。
 
+**真实数据上的零样本行（2026-09-26 落地）**：契约修复外推成功——真实 test 块（492 行 / 5 正样本）**479/492 解析**（13 行因答错标签名被守卫拒绝，正样本零丢弃），**AUC 0.7542 / KS 0.5451 / PR-AUC 0.0960 / 方向 `positives_higher`**。注意该行 prompt 携带 12 列结构化信号，正确的对照是 `structured_matched`（同样的 12 列）：配对 AUC **+0.0034** [−0.3491, +0.4367]、PR-AUC **+0.0702** [−0.0192, +0.2354]，区间均跨零。可写：零样本基线已实测、点估计不落后、值得跟踪；不可写：文本轨赢了——5 个正样本上没有任何数字过得了那一关。产物 `artifacts/lora-eval/20260926T075133Z`（69.5 h 墙钟，bs=1 + 4-bit ≈ 8.4 tok/s；产物早于引用审计，引用未审计）。详见 [09](09-lora-evaluation.md) §13.9.1。
+
 这张表直接对应 `shingan eval compare --runs structured text fused`。
 
 ### 5.2 消融
