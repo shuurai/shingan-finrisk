@@ -328,8 +328,7 @@ def fetch_fundamentals(
     # comparatives, so (filed) alone is not unique. Keep the latest period_end — the
     # period the filing is actually about. The as-of join then has exactly one
     # candidate per filing date, which is what makes the join deterministic.
-    frame = frame.drop_duplicates(subset=["ticker", "filed"], keep="last").reset_index(drop=True)
-    return frame
+    return frame.drop_duplicates(subset=["ticker", "filed"], keep="last").reset_index(drop=True)
 
 
 def fetch_filings_text(
@@ -585,7 +584,18 @@ def main() -> None:
         )
         print(f"filings: {len(filings)} sections, {filings['ticker'].nunique()} tickers")
 
-    news = pd.DataFrame(columns=NEWS_COLUMNS)
+    # A re-run must not wipe an ingested FNSPID snapshot: downloading 29 GB is a
+    # cost this script cannot refund, so an existing non-empty news.parquet stands.
+    news_path = out_dir / "news.parquet"
+    if news_path.is_file():
+        existing_news = pd.read_parquet(news_path)
+        if len(existing_news):
+            news = existing_news
+            print(f"news: kept {len(news):,} existing rows in {news_path} (ingested snapshot left untouched)")
+        else:
+            news = pd.DataFrame(columns=NEWS_COLUMNS)
+    else:
+        news = pd.DataFrame(columns=NEWS_COLUMNS)
     events = pd.DataFrame(columns=EVENTS_COLUMNS)
 
     if prices.empty:

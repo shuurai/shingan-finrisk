@@ -182,7 +182,12 @@ def deduplicate_news(
                 )
                 continue
 
-            prefix = str(working.at[index, "body"] or "")[:prefix_chars]
+            # The body may be missing (a headline-only source ships no article
+            # text), and ``pd.NA or ""`` raises -- its truthiness is ambiguous by
+            # design. Test for missingness explicitly instead.
+            body = working.at[index, "body"]
+            prefix = "" if pd.isna(body) else str(body)
+            prefix = prefix[:prefix_chars]
             current = shingle_set(prefix) if prefix else set()
             # Read the timestamp once and coerce it. `DataFrame.at` is typed as a
             # wide union that does not include Timestamp, and subtracting a union
