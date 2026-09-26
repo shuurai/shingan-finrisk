@@ -12,6 +12,18 @@ The dataset schema and the label definitions are versioned separately via the
 ## [Unreleased]
 
 ### Added
+- `shingan eval lora` accepts `--load-in-4bit/--no-load-in-4bit`, overriding the
+  config default. Unquantised bf16 loading decodes several times faster than
+  bitsandbytes 4-bit on Blackwell (the 4-bit decode kernels are unoptimised
+  there); the resolved value is recorded in the artifact's `quantization` field,
+  and scoring an adapter arm on a different substrate from its training config
+  prints a warning — the delta is then not a paired measurement.
+- `scripts/placebo_corpus.py` writes a deterministic `manifest.json` (seed,
+  source and output SHA-256s, per-split counts) into the placebo corpus
+  directory, so a placebo training run's `run.json` embeds the same provenance
+  chain as a real one. Rebuilding with the same seed is byte-identical; the
+  already-produced placebo `run.json` keeps its "no manifest" note rather than
+  being rewritten.
 - Data provenance that travels with the artifacts: `sft/manifest.json` and the
   training `run.json` now carry a `data` block (source set, `is_synthetic`,
   panel shape, raw-table SHA-256s, and — for training — the hashes of the SFT

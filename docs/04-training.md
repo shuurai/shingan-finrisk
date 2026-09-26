@@ -290,6 +290,8 @@ python -m shingan eval lora --mode adapter --adapter artifacts/lora-placebo/adap
 
 第 3 步必须 `--no-verify-prompts`：重建 prompt 与安慰剂语料**本来就该**不一致，这正是置换的目的。链路完整性改由安慰剂 run.json 的 `data` 段承担（它记录了安慰剂语料的哈希）。对照量：安慰剂适配器 vs `artifacts/lora-contract-v2`（合成评测 `artifacts/lora-eval/20260923T094317Z`，64 行、9 正）的两臂指标与逐行分数。
 
+第 1 步同时会在输出目录写确定性的 `manifest.json`（seed、源/输出文件 SHA-256、逐 split 计数），`train lora` 经 `training_data_block` 把它内嵌进 run.json——安慰剂臂的溯源链与真实臂同构。重跑同 seed 逐字节一致。
+
 
 ## 4. 失败模式与修复
 

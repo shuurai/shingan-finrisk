@@ -926,4 +926,48 @@ contract-v2 语料**——即 `lora-contract-v2` 适配器实际训练所用的�
 `run.json` 的 `data` 段记录了安慰剂语料的 SHA-256（train `c5ae100c…`、valid
 `0ad21eee…`）——Step 9 的字段在第一次真实训练里就接上了。一个缺口：`placebo_corpus.py`
 没有在 `data/processed/sft_placebo/` 写 `manifest.json`，`run.json` 内嵌的 SFT manifest
-因此为空。补上（下次跑 placebo 时）。
+因此为空。已于 2026-09-26 补上（§16.2）：脚本现在写确定性的 manifest，重跑 seed 7 与
+现存语料逐字节一致后回填。已有安慰剂 run.json 里的 "no manifest beside" 备注如实保留——
+产物不做追溯改写。
+
+## 16. Step 11 — 评测提速选项与 placebo 溯源补齐（2026-09-26）
+
+安慰剂实验结束后的两个小步：一个是把 69.5 小时的评测黑洞变成可选项，一个是把 §15.4
+记录的溯源缺口闭合。都不改任何已产出的数字。
+
+### 16.1 `eval lora` 的 `--no-load-in-4bit`：bf16 加载成为一等选项
+
+§13.9.1 的取证结论（8.4 tok/s、479 s/行、显存带宽受限签名）指向一个便宜的修复：
+bitsandbytes 的 4-bit 解码 kernel 在 Blackwell（sm_120）上未调优，每 token 全量反量化；
+bf16 加载省掉这一层，解码快数倍。代价是显存：14B bf16 约 28 GB，5090 的 32 GB 装得下。
+
+实现（`shingan eval lora --no-load-in-4bit`）：
+
+- CLI 选项 `--load-in-4bit/--no-load-in-4bit`，缺省回落到 config 的 `lora.load_in_4bit`；
+  **同一个解析值同时**传给 `describe_model`（记录进 artifact 的 `quantization` 字段）和
+  `load_for_inference`（真正应用）。记录值与加载值漂移是本项目定义的溯源 bug。
+- **基座失配警告**：adapter 臂被用与训练配置（4-bit）不同的精度打分时打印黄色警告。
+  允许，但 delta 对 4-bit 打分的产物**不是配对测量**。zero_shot 臂无此问题——它没有
+  "训练时的基座"这一说。
+- `identity.quantization` 照常如实记录（如 `bfloat16, unquantised`），CI 已有该字符串
+  的测试（`test_an_unquantised_run_says_so`）。
+
+**使用纪律（写在这里就是纪律，不是建议）**：贪心解码在不同数值基座上分数可以不同。
+第一次换 bf16 时，先用 `--limit 12 --no-load-in-4bit` 与既有 4-bit 产物的对应行对比——
+预期多数行同分、个别行漂移；若系统性翻转，停下来查，不要直接替换 69.5 小时的数字。
+
+### 16.2 `placebo_corpus.py` 补写 `manifest.json`
+
+`training_data_block`（Step 9）在训练文件旁找 `manifest.json` 并内嵌进 run.json 的
+`data` 段；安慰剂目录没有这个文件，所以 §15.4 记录了"安慰剂 run.json 内嵌清单为空"。
+脚本现在在输出目录写**确定性** manifest（`placebo-manifest-v1`：seed、源文件哈希、
+输出文件哈希、每 split 记录数与固定不动的 user turn 数）——内容只有哈希与计数，没有
+时间戳，重跑逐字节一致。
+
+回填验证：重跑 seed 7 到临时目录，`train.jsonl`（`c5ae100c…`）/`valid.jsonl`
+（`0ad21eee…`）与现存安慰剂语料逐字节一致——顺带第三次实证了生成器确定性——然后把
+manifest 落进 `data/processed/sft_placebo/`。**已有安慰剂 run.json 不改写**：它当时如实
+记录了清单缺失，事后把 note 改成清单等于篡改产物。下次安慰剂运行起，溯源链自动闭合。
+
+新增 `tests/test_placebo_corpus.py`（4 项）：置换只动 user turn、manifest 哈希与实际
+文件一致、重跑逐字节一致、非"每记录恰好一个 user turn"的源被拒绝。全套 314 项绿。

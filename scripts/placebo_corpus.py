@@ -20,6 +20,11 @@ Usage:
     python scripts/placebo_corpus.py \
         --src data/processed/sft --dst data/processed/sft_placebo --seed 7
 
+The output directory also gets a deterministic ``manifest.json`` (seed, source
+hashes, output hashes, per-split counts), which ``training_data_block`` embeds
+into the placebo training run's ``run.json`` — closing the provenance chain for
+the placebo arm the same way the real arm's is closed.
+
 Train with:
     python -m shingan train lora --train-file data/processed/sft_placebo/train.jsonl \
         --eval-file data/processed/sft_placebo/valid.jsonl \
@@ -34,12 +39,21 @@ chain, not the byte-comparison gate.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import random
 import sys
 from pathlib import Path
 
 SPLITS = ("train", "valid")
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -76,6 +90,8 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     rng = random.Random(args.seed)
     args.dst.mkdir(parents=True, exist_ok=True)
+    sources: dict[str, dict] = {}
+    outputs: dict[str, dict] = {}
     for split in SPLITS:
         source = args.src / f"{split}.jsonl"
         records = [json.loads(line) for line in source.read_text(encoding="utf-8").splitlines()
@@ -85,8 +101,36 @@ def main(argv: list[str] | None = None) -> None:
         with open(out, "w", encoding="utf-8", newline="\n") as handle:
             for record in records:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        sources[split] = {"sha256": sha256_file(source), "bytes": source.stat().st_size}
+        outputs[split] = {
+            "n_records": len(records),
+            "user_turns_fixed_in_place": fixed,
+            "sha256": sha256_file(out),
+            "bytes": out.stat().st_size,
+        }
         print(f"{split}: {len(records)} records, user turns permuted ({fixed} stayed in place)")
-    print(f"placebo corpus written to {args.dst} (seed {args.seed})")
+    # Written last, and deterministic: the manifest holds only hashes, counts and the
+    # seed, so re-running with the same inputs reproduces it byte for byte. Without it
+    # the training run.json's provenance chain hits `training_data_block`'s "no
+    # manifest beside the file" note, and the placebo arm is the one arm that most
+    # needs its provenance intact.
+    manifest = {
+        "kind": "placebo",
+        "schema_version": "placebo-manifest-v1",
+        "seed": args.seed,
+        "source_sft_dir": str(args.src),
+        "source_files": sources,
+        "output_files": outputs,
+        "method": (
+            "user turns permuted within each split with a fixed seed; system turns, "
+            "assistant targets and meta blocks are untouched, so label distribution "
+            "and prompt geometry are preserved by construction"
+        ),
+    }
+    manifest_path = args.dst / "manifest.json"
+    with open(manifest_path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+    print(f"placebo corpus written to {args.dst} (seed {args.seed}, manifest.json included)")
 
 
 if __name__ == "__main__":

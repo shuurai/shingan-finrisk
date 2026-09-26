@@ -995,6 +995,19 @@ def eval_lora(
     temperature: Annotated[
         float, typer.Option("--temperature", help="0 for greedy; anything else samples.")
     ] = 0.0,
+    load_in_4bit: Annotated[
+        bool | None,
+        typer.Option(
+            "--load-in-4bit/--no-load-in-4bit",
+            help="Quantise the base weights to 4-bit NF4. Default: from config. "
+            "--no-load-in-4bit loads bf16 instead (~28 GB VRAM for a 14B model). On "
+            "Blackwell the bitsandbytes 4-bit decode kernels are unoptimised, which "
+            "is how a healthy 14B decode measured 8.4 tok/s; bf16 measured several "
+            "times faster. The recorded quantisation travels with the artifact "
+            "either way, and greedy scores can differ between substrates — compare a "
+            "limited run against the 4-bit numbers before replacing one.",
+        ),
+    ] = None,
     verify_prompts: Annotated[
         bool,
         typer.Option(
@@ -1096,12 +1109,16 @@ def eval_lora(
     adapter_dir: Path | None = adapter
     if not uses_adapter and base_model is not None:
         adapter_dir = None
+    # CLI wins, config is the default. The same resolved value must reach both
+    # describe_model (which records it) and load_for_inference (which applies it):
+    # a recorded quantisation that drifts from the loaded one is a provenance bug.
+    effective_4bit = project.lora.load_in_4bit if load_in_4bit is None else load_in_4bit
     try:
         identity = describe_model(
             mode=mode,
             adapter_dir=adapter_dir,
             base_model=base_model or (None if adapter_dir is not None else project.lora.base_model),
-            load_in_4bit=project.lora.load_in_4bit,
+            load_in_4bit=effective_4bit,
             compute_dtype=project.lora.bnb_4bit_compute_dtype,
         )
     except FileNotFoundError as exc:
@@ -1191,6 +1208,15 @@ def eval_lora(
         f"mode {identity.mode}: scoring {', '.join(arms)} on base {identity.base_model} "
         f"(tokenizer from {identity.tokenizer_source})"
     )
+    if uses_adapter and effective_4bit != project.lora.load_in_4bit:
+        console.print(
+            "[yellow]warning: this run scores the adapter on "
+            f"{'bf16' if not effective_4bit else '4-bit nf4'} while the config it was "
+            f"trained under specifies {'4-bit nf4' if project.lora.load_in_4bit else 'bf16'}. "
+            "That is a different numerical substrate from training; it is recorded in the "
+            "artifact, but a delta against a run scored on the training substrate is not a "
+            "paired measurement.[/yellow]"
+        )
     if integrity is not None:
         verdict = "" if uses_adapter else "  [not a gate: no adapter arm is scored]"
         console.print(
@@ -1215,7 +1241,7 @@ def eval_lora(
             identity,
             device_map="auto" if project.lora.device_map == "auto" else "none",
             attn_implementation=project.lora.attn_implementation,
-            load_in_4bit=project.lora.load_in_4bit,
+            load_in_4bit=effective_4bit,
             compute_dtype=project.lora.bnb_4bit_compute_dtype,
         )
     except MissingInferenceDependencies as exc:
