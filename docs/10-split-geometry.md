@@ -1,8 +1,15 @@
 # 10 切分几何修订：方案对比（决策文档，2026-09-26）
 
-**状态：等待拍板。本文档只分析与推荐，不改任何配置。** 拍板后重跑
-`data build`（CPU 分钟级）即可让新切分生效；本文档的全部数字用仓库自己的
-`assign_split_column` 模拟，与实现零漂移（模拟脚本见 §6）。
+**状态：已拍板方案 A（2026-09-26）。** 配置变更落在 `configs/data/stage2_real.yaml`
+（真实运行的实际 overlay），`configs/default.yaml` 不动——合成流水线保持原几何，
+两条数据线的切分定义从此显式分叉。重跑 `data build --data-config
+configs/data/stage2_real.yaml`（CPU 分钟级）即可让新切分生效；本文档的全部数字用
+仓库自己的 `assign_split_column` 模拟，与实现零漂移（模拟脚本见 §6）。
+
+> 口径更正：§1 的 S0 行数（617/253/544/396）是 `default.yaml` 全局 purge=730 的
+> 模拟口径；真实面板实际由 stage2_real overlay 的 purge=60 构建，行数为
+> train 844 / valid 390 / test 541 / purged 35 / excluded 411。**正样本数完全一致**
+> （4/1/5 + 27 excluded）——决策依据不受影响，但行数核对以下文 §5 的 A 预测为准。
 
 ## 1. 问题：39 个真实正样本，评测只用了 10 个
 
@@ -93,15 +100,26 @@ test 2021–2024，`purge_days=730` + `embargo_days=30`（交易日）。purge �
 再扩；评测效力牺牲到扩池之后补。两个方向都合法，取决于先要"能评测"还是先要
 "能选模"。
 
-## 5. 决定后的执行清单（拍板后自动依次做）
+## 5. 已拍板：方案 A 的执行清单与核对数字
 
-1. `configs/default.yaml`：`per_label: true`、`purge_days: 45`、
-   `test.start: 2020-01-01`（A）或对应 B' 变体；`docs/02`、`docs/05` 同步切分定义。
-2. 重跑 `data build --data-config configs/data/stage2_real.yaml`，核对
-   split 报告与本文档 §3 的预测逐项一致（不一致 = 停下来查）。
-3. 重跑 `eval run`（结构化/TF-IDF/fusion 四行 + matched 基线），全部带区间。
-4. CHANGELOG 标记"真实数字以 2026-09-xx 切分为准"，旧数字在 docs/09 标注失效。
-5. LoRA 重训与 SFT 引用形状修复同批；评测用 `--no-load-in-4bit`（§bf16 已上线）。
+1. ✅ `configs/data/stage2_real.yaml`：`per_label: true`、`purge_days: 45`、
+   `test.start: 2020-01-01`（2026-09-26 已改，merge 已验证：train/valid 窗口继承
+   default，test.end 保持 2024-12-31）。`configs/default.yaml` 不动。
+2. 重跑 `data build --data-config configs/data/stage2_real.yaml`，核对 split 报告与
+   **A 精确预测**（按 overlay purge=45 实测，非 §3 的 730 口径）逐项一致，
+   不一致 = 停下来查：
+
+   | 块 | train | valid | test | purged | excluded |
+   | --- | --- | --- | --- | --- | --- |
+   | 行数 | 844 | 356 | **680** | 66 | 275 |
+   | 正样本 | 4 | 1 | **32** | 2 | **0** |
+
+   有效窗口：train → 2016-10-06，valid 2017-01-01 → 2019-10-06，test 2020-01-01 起。
+3. 重跑 `eval run --data-config configs/data/stage2_real.yaml`（结构化/TF-IDF/fusion
+   四行 + matched 基线），全部带区间；test 首次过 ≥20 正门禁，报告按年分组披露。
+4. CHANGELOG 标记"真实数字以 2026-09-26 切分为准"，旧数字在 docs/09 标注失效。
+5. LoRA 重训与 SFT 引用形状修复同批（尚未开始）；零样本臂可用 `--no-load-in-4bit`
+   对新 test 重跑，无需等重训。
 
 ## 6. 复现
 

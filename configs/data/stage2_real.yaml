@@ -54,9 +54,14 @@ labels:
   targets: [tail_risk]
 
 split:
-  # The default 730 is sized for fraud_risk's horizon and is *not* lowered
-  # automatically when fewer targets are configured — the validator only rejects
-  # values that are too small. With tail_risk alone (~42 calendar days) a 60-day
-  # purge keeps the point-in-time guarantee without sacrificing two extra years of
-  # sample; margin = 60 + 30 embargo = 90 days.
-  purge_days: 60
+  # Split geometry revision A (docs/10-split-geometry.md, decided 2026-09-26):
+  # per_label gives tail_risk its own horizon-sized margin instead of fraud_risk's
+  # 730 days -- purge 45 (>= the 42-calendar-day horizon) + 30 embargo trading days.
+  # test.start moves to 2020-01-01 so the 27 crash-year positives stop falling
+  # outside every window; test goes from 5 to 32 positives and clears the project's
+  # own min_positives_for_metrics=20 gate. The cost is accepted and documented:
+  # the test block is dominated by the 2020 regime and must be reported per year.
+  per_label: true
+  purge_days: 45
+  test:
+    start: 2020-01-01
