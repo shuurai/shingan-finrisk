@@ -740,6 +740,11 @@ class EvaluationReport:
     ablation: pd.DataFrame = field(repr=False, default_factory=pd.DataFrame)
     rolling_folds: pd.DataFrame = field(repr=False, default_factory=pd.DataFrame)
     caveats: list[str] = field(default_factory=list)
+    #: Row counts of the raw text sources behind this run, so the section-9 note can
+    #: describe the corpus this run actually had instead of asserting a fixed one. The
+    #: note used to hard-code "no news source wired", which quietly became false the
+    #: day a snapshot was ingested — a displayed claim contradicting the run.
+    text_corpus: dict[str, int] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -769,6 +774,7 @@ class EvaluationReport:
                 self.rolling_folds.to_dict(orient="records") if not self.rolling_folds.empty else []
             ),
             "caveats": list(self.caveats),
+            "text_corpus": dict(self.text_corpus),
         }
 
     def to_markdown(self) -> str:
@@ -1023,16 +1029,32 @@ class EvaluationReport:
             lines.append("")
             # The label "text" invites a reading the table cannot support, and the
             # correction has to travel with the numbers rather than live in a docstring.
+            # What that correction says depends on what the corpus contained: the
+            # counts come from the build, not from this template's assumptions.
+            news_rows = self.text_corpus.get("news_rows", 0)
+            filing_rows = self.text_corpus.get("filing_sections", 0)
+            populated = [name for count, name in ((filing_rows, "FILING"), (news_rows, "NEWS")) if count > 0]
+            if populated:
+                corpus_line = (
+                    f"In this run the prompt's {' and '.join(populated)} block(s) are "
+                    f"populated ({filing_rows:,} filing section(s), {news_rows:,} news row(s)), "
+                    "so the text metrics describe real document and news text on top of the "
+                    "structured block."
+                )
+            else:
+                corpus_line = (
+                    "In this run the filing and news blocks are empty (no document text "
+                    "fetched, no news source wired), so `text` is a bag-of-words model "
+                    "over the structured signals and nothing else."
+                )
             lines.append(
                 "> `structured` is the gradient-boosted model over the numeric feature "
                 "matrix. `text` is the TF-IDF baseline over the *rendered user prompt*, "
                 "and that prompt contains a `STRUCTURED_SIGNALS` block — it is the same "
                 "input the LoRA sees, which is what makes the comparison a comparison of "
                 "model classes rather than of modalities. `text` is therefore **not** a "
-                "text-only path: where the filing and news blocks are empty (no document "
-                "text fetched, no news source wired) it is a bag-of-words model over the "
-                "structured signals and nothing else. A claim about the information "
-                "content of disclosure text requires a run whose corpus is non-empty."
+                f"text-only path. {corpus_line} A claim about the information content "
+                "of disclosure text requires a run whose corpus is non-empty."
             )
             lines.append("")
 

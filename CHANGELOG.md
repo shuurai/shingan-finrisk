@@ -12,6 +12,16 @@ The dataset schema and the label definitions are versioned separately via the
 ## [Unreleased]
 
 ### Added
+- `EvaluationReport.text_corpus` carries the raw text-source row counts (news rows,
+  filing sections) into the report payload, and the section-9 note about what the
+  TF-IDF baseline actually sees is now generated from them instead of asserting
+  "no news source wired" -- a claim that became false the day the FNSPID snapshot
+  was ingested.
+- `scripts/ingest_fnspid.py` streams the FNSPID news snapshot (29 GB of CSV) into
+  `data/raw/real/news.parquet`: chunked reads, universe/window filtering, the
+  `NEWS_COLUMNS` contract, syndication de-duplication (71k dropped of 240k kept),
+  and a per-drop audit log. `load_cached_tables` already reads that path, so
+  `data build` picks news up with no further wiring.
 - `shingan publish hf --data-file` uploads data files into the dataset
   repository alongside the card (repeatable). Every file is pre-flighted
   locally before anything reaches the network: a parquet whose row count

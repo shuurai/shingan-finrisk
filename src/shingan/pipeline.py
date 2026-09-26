@@ -1522,6 +1522,13 @@ def assemble_report(result: PipelineResult, *, run_id: str | None = None) -> Eva
             + result.notes
             + _unfitted_notes(result)
         ),
+        # Row counts of the raw text sources, so the section-9 note describes the
+        # corpus this run actually had. The build's frames are the ground truth —
+        # feature columns could be zero for reasons other than an empty source.
+        text_corpus={
+            "news_rows": len(result.build.news),
+            "filing_sections": len(result.build.filings),
+        },
     )
 
 

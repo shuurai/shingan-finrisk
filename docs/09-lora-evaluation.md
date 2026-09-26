@@ -971,3 +971,41 @@ manifest 落进 `data/processed/sft_placebo/`。**已有安慰剂 run.json 不�
 
 新增 `tests/test_placebo_corpus.py`（4 项）：置换只动 user turn、manifest 哈希与实际
 文件一致、重跑逐字节一致、非"每记录恰好一个 user turn"的源被拒绝。全套 314 项绿。
+
+## 17. Step 12 — 新切分 + 新闻语料的首轮真实评测（run 20260926T162144Z）
+
+方案 A 切分与 FNSPID 新闻接入后的第一次 `eval run`（structured / TF-IDF / fusion +
+matched 基线，test 616 个 mask-true 行、**32 正样本**，首次越过
+`min_positives_for_metrics=20`——这是本仓库第一次"样本充足"的真实评测）。
+
+### 17.1 结果表
+
+| path | AUC | KS（方向） | PR-AUC | lift |
+| --- | --- | --- | --- | --- |
+| structured | 0.4755 | 0.1087（negatives_higher） | 0.0485 | 0.93x |
+| structured_matched | 0.5506 | 0.1794（positives_higher） | 0.0595 | 1.14x |
+| **text_baseline（TF-IDF）** | **0.6105** | 0.3990（positives_higher） | **0.2084** | **4.01x** |
+| fused | 0.5070 | 0.1318（negatives_higher） | 0.0603 | 1.16x |
+
+### 17.2 四条防误读
+
+1. **"文本轨 4 倍 lift"不是文本语义的证据。** TF-IDF 的 prompt 现在含真实新闻流
+   （168,541 条，52% 行非空）；2020 崩盘期新闻量激增，"新闻量大 ⇒ 崩盘"是一个强
+   频率代理特征。它证明的是新闻**量**的信息含量，不是对新闻**内容**的理解。真正的
+   语义检验仍是 LoRA 臂（待重训）。
+2. **fused 差于 text_baseline 是方案 A 的已知代价显形**：fusion stacker 拟合在
+   valid 的 1 个正样本上（报告自述"系数描述那些行而不是信号"）。F1（fusion 增量）
+   依然 triggered。校准/选模的瘸腿只能靠扩池或 B' 类切分解决，本切分下无解。
+3. **structured 在 2020 regime 下方向反了**（AUC 0.4755、negatives_higher；COVID
+   压力窗 AUC 0.4661 同样反向；2022 年窗口 0.5396 勉强为正）。旧报告"结构化 AUC
+   0.7686"的读数随旧切分一起作废——那个数字建立在 5 个正样本上。
+4. **headline gates 全 FAIL 是评测效力的胜利，不是项目的失败**：旧切分下这些门禁
+   是"样本不足、不可判定"；现在是"可判定、判负"。答案暂时是否定的，但终于是一个
+   能回答问题的框架。其余缺口（VIX、信用利差、beta、turnover、sentiment 特征）在
+   caveats 里如实列出。
+
+### 17.3 报告注释的动态化
+
+§9 的 TF-IDF 说明此前硬编码"news blocks are empty / no news source wired"——新闻
+接入当天它就变成假话。`EvaluationReport` 新增 `text_corpus`（来自 build 的原始表
+行数，非特征列推断），注释按本 run 实际语料生成；JSON payload 同步携带。
