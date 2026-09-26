@@ -29,6 +29,7 @@
 | [07 路线图](07-roadmap.md) | Stage 0-5 分阶段计划、每阶段的风险与推进条件 | 规划节奏的人 |
 | [08 命名决策](08-naming.md) | 四个候选名的比较、评分标准、Shingan 胜出理由、命名族、改名流程 | 关心命名与品牌一致性的人 |
 | [09 LoRA 评测接入](09-lora-evaluation.md) | 把已训好的适配器接进评测的**步骤日志**：目标、决策与理由、实际命令、产物、验证了什么与没验证什么（含零样本对照臂 `text_only_zero_shot` 与它的指令契约缺口） | 想知道"文本轨有没有增量"这个问题的答案从哪来的人 |
+| [10 切分几何修订](10-split-geometry.md) | **决策文档（待拍板）**：39 个真实正样本里 69% 落在切分空档的根因（fraud 的 730 天 purge 绑架 + test 从 2021 起跳过 2020）、四个方案的实测对比、推荐方案与其代价 | 决定真实评测数字何时变得可判定的人 |
 | [ADR-0001](adr/0001-project-name.md) | 项目命名决策记录 | — |
 | [ADR-0002](adr/0002-training-stack-windows.md) | cu128/Blackwell 与训练栈选择（TRL+PEFT+bitsandbytes） | — |
 | [ADR-0003](adr/0003-dual-track-over-single-lora.md) | 为什么拒绝"单一 LoRA 吞下全部输入" | — |
