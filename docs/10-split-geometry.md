@@ -105,16 +105,20 @@ test 2021–2024，`purge_days=730` + `embargo_days=30`（交易日）。purge �
 1. ✅ `configs/data/stage2_real.yaml`：`per_label: true`、`purge_days: 45`、
    `test.start: 2020-01-01`（2026-09-26 已改，merge 已验证：train/valid 窗口继承
    default，test.end 保持 2024-12-31）。`configs/default.yaml` 不动。
-2. 重跑 `data build --data-config configs/data/stage2_real.yaml`，核对 split 报告与
-   **A 精确预测**（按 overlay purge=45 实测，非 §3 的 730 口径）逐项一致，
-   不一致 = 停下来查：
+2. ✅ 已重建（2026-09-26，含 FNSPID 新闻接入后的首次 rebuild）。**实测 vs 预测**：
 
    | 块 | train | valid | test | purged | excluded |
    | --- | --- | --- | --- | --- | --- |
-   | 行数 | 844 | 356 | **680** | 66 | 275 |
-   | 正样本 | 4 | 1 | **32** | 2 | **0** |
+   | 行数（实测） | 844 ✓ | 356 ✓ | **677**（预测 680） | **69**（预测 66） | 275 ✓ |
+   | 正样本（实测） | 4 ✓ | 1 ✓ | **32 ✓** | 2 ✓ | **0 ✓** |
 
-   有效窗口：train → 2016-10-06，valid 2017-01-01 → 2019-10-06，test 2020-01-01 起。
+   行数微差的根因：模拟把 `data_end` 设为面板真实末端（2026-09-10），而 build 用
+   配置的 `data.end`（2024-12-31）作窗口右端并对 test 块末端同样扣除 42 天
+   embargo → test 有效末端 2024-11-19，3 行挪入 purged。**build 的语义更保守**，
+   且全部正样本在 2023 年（早于有效末端），决策数字不受影响。test 2023 年 1 个
+   正样本（12 月前的 WBA 类事件）在 test 内。
+   有效窗口：train → 2016-10-06，valid 2017-01-01 → 2019-10-06，
+   test 2020-01-01 → 2024-11-19。
 3. 重跑 `eval run --data-config configs/data/stage2_real.yaml`（结构化/TF-IDF/fusion
    四行 + matched 基线），全部带区间；test 首次过 ≥20 正门禁，报告按年分组披露。
 4. CHANGELOG 标记"真实数字以 2026-09-26 切分为准"，旧数字在 docs/09 标注失效。
