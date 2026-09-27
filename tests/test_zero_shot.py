@@ -430,3 +430,30 @@ def test_cli_exposes_the_thinking_flag():
     result = CliRunner().invoke(app, ["eval", "lora", "--help"])
     assert result.exit_code == 0
     assert "--no-thinking" in result.output and "--thinking" in result.output
+
+
+# -- the checkpoint: finished rows survive a crash ------------------------------
+
+
+def test_checkpoint_round_trips_rows_per_key(tmp_path):
+    from shingan.models.lora_inference import GenerationCheckpoint
+
+    cp = GenerationCheckpoint(tmp_path / "cp.jsonl")
+    assert cp.completed("text_only_zero_shot") == {}
+    cp.extend("text_only_zero_shot", [(3, "row three"), (1, "row one")])
+    cp.extend("text_only_zero_shot", [(7, "row seven")])
+    cp.extend("text_only_lora", [(3, "adapter row three")])
+
+    done = cp.completed("text_only_zero_shot")
+    assert done == {3: "row three", 1: "row one", 7: "row seven"}
+    # another arm's rows must not leak in
+    assert cp.completed("text_only_lora") == {3: "adapter row three"}
+
+
+def test_checkpoint_completed_reads_an_existing_file(tmp_path):
+    from shingan.models.lora_inference import GenerationCheckpoint
+
+    path = tmp_path / "cp.jsonl"
+    line = '{"key": "a", "i": 2, "text": "x"}'
+    path.write_text(line + "\n", encoding="utf-8")
+    assert GenerationCheckpoint(path).completed("a") == {2: "x"}

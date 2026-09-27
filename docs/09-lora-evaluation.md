@@ -1036,3 +1036,32 @@ matched 基线，test 616 个 mask-true 行、**32 正样本**，首次越过
 §9 的 TF-IDF 说明此前硬编码"news blocks are empty / no news source wired"——新闻
 接入当天它就变成假话。`EvaluationReport` 新增 `text_corpus`（来自 build 的原始表
 行数，非特征列推断），注释按本 run 实际语料生成；JSON payload 同步携带。
+
+### 16.4 第三个根因：预算密度假说与 MATH 后端回落（2026-09-27，OOM 剖析）
+
+真实 677 行 bf16 零样本在 160/616 处 CUDA OOM（单次分配 35.35 GiB）。三层原因，逐层实测：
+
+1. **字符密度**。预算公式把 `max_seq_length=4096` 按 3.6 字符/token 折算成 12,945 字符——
+   这是英文散文的密度。真实语料（SEC 摘录+新闻标题+信号行，充满数字/代码/日期）用实际
+   tokenizer 全分布实测 **1.84–2.05 字符/token**（中位 ~1.94）。于是预算"字面守约"地
+   产出了 ~7,000 token 的 prompt，超限 64%——508/616 行顶满预算。**预算从未真正管住
+   token**，此前无人发现是因为没有任何路径在发送前 tokenize 渲染结果。
+   `CHARS_PER_TOKEN` 改为 1.9（实测依据写进常量注释），预算变为 ~5,982 字符 ≈ 3.1k
+   token，prompt 终于真正 ≤4096。**代价**：prompt 内容比旧语料短一半，SFT 语料需要在
+   下次重训前重建（本就排队）；合成语料字节一致性随之失效，重建即可。
+2. **MATH 后端回落**。Windows 的 torch 未编译 flash attention；SDPA 分发器在 4D 掩码
+   存在时可能选 MATH 后端——它物化整个 Lq×Lk 权重张量（本机实测：L=4096/B=4 峰值
+   26 GB；L≈7k 时即 35 GiB 单次分配）。`load_for_inference` 现在全局禁用 math SDP：
+   memory-efficient 后端实测同形状仅 ~2.5 GB；若 efficient 也拒绝某形状，报错优于
+   数小时后 OOM。
+3. **单点长行拖垮全批**。prompt 长度方差大，一批 4 行的峰值由最长行决定。
+   `_generate_batch` 现在捕获 `torch.OutOfMemoryError` 后清缓存并把批对半重试，
+   单行仍 OOM 才抛出。
+
+**韧性：checkpoint 续跑**。`generate_texts` 支持 `GenerationCheckpoint`——每批完成即
+追加 JSONL（按臂分 key、fsync 落盘）；eval lora 用运行指纹（行身份哈希+全部生成设置）
+命名 checkpoint 文件，重启自动续跑，产物写出后删除。**本次崩溃损失的 160 行（约 5 小时）
+是这条修复的直接动机**：解码不可按需重放，中间状态就不能只活在进程内存里。
+
+重启命令要点：新指纹自动生效；建议 `--batch-size 2`（weights 28 GB + 3.1k token 批 2
+留有余量）；启动验证 `weights placed on: cuda:0`。

@@ -19,6 +19,10 @@ The dataset schema and the label definitions are versioned separately via the
   budget ended mid-JSON. Disabling thinking spends the budget on the answer and
   matches the SFT target shape; the choice is recorded in the artifact.
 ### Fixed
+- The prompt character budget translated max_seq_length with a prose density constant
+  (3.6 chars/token); the real corpus measures 1.84-2.05, so "within budget" prompts
+  were ~7,000 tokens against a 4,096 limit. The constant is now 1.9, measured; SFT
+  corpora must be rebuilt at the next retrain.
 - `eval lora` placed bf16 weights on the CPU unless `lora.device_map` was exactly
   "auto": "single" is training semantics (the Trainer moves the model itself),
   but inference passes device_map straight to `from_pretrained`, whose default

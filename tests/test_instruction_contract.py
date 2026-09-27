@@ -163,3 +163,19 @@ def test_the_previous_reserve_would_have_overflowed() -> None:
 
     assert outcomes[1_500] is False
     assert outcomes[PROMPT_OVERHEAD_CHARS] is True
+
+
+def test_the_chars_per_token_constant_stays_below_prose_assumptions() -> None:
+    """The budget is only honest if the density constant matches the real corpus.
+
+    The prompt body is not English prose: filing excerpts, structured signals and
+    news headlines are dense with numerals, tickers and dates. Measured with the
+    actual tokenizer on the Stage-2 real corpus across the full prompt-length
+    distribution: 1.84-2.05 characters per token. A "prose" constant of 3.6 or 4
+    silently produced ~7,000-token prompts against a 4,096 limit -- the overflow
+    surfaced as a CUDA OOM hours into an eval, not as an error at build time.
+    """
+    assert CHARS_PER_TOKEN <= 2.1, (
+        "CHARS_PER_TOKEN was raised past the measured corpus density (1.84-2.05 c/t); "
+        "a prompt filling the budget would overflow max_seq_length again"
+    )

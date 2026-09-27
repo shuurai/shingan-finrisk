@@ -44,11 +44,18 @@ from shingan.logging_utils import get_logger
 
 logger = get_logger(__name__)
 
-#: Average characters per token for English prose, used to translate
-#: ``max_seq_length`` into a character budget. 3.6 is deliberately pessimistic
-#: (the usual rule of thumb is 4): financial filings are dense with numerals,
-#: tickers and punctuation, all of which tokenise to fewer characters than prose.
-CHARS_PER_TOKEN = 3.6
+#: Average characters per token, used to translate ``max_seq_length`` into a
+#: character budget. 3.6 was calibrated on English prose and is already
+#: pessimistic by prose standards (the usual rule of thumb is 4) -- but the real
+#: prompt body is not prose: filing excerpts, structured-signal lines and news
+#: headlines are dense with numerals, tickers, dates and punctuation, all of
+#: which tokenise to far fewer characters. Measured on the Stage-2 real corpus
+#: with the actual tokenizer across the full length distribution: 1.84-2.05
+#: characters per token (median ~1.94). At 3.6 the budget produced ~7,000-token
+#: prompts against a 4,096 limit -- a 64% overflow that only surfaced as a CUDA
+#: OOM hours into an eval, because nothing tokenises the rendered prompt before
+#: sending it. 1.9 keeps a margin below the densest measured value.
+CHARS_PER_TOKEN = 1.9
 
 #: Fixed overhead reserved for the system prompt, the task block and the closing
 #: markers, so the budget arithmetic cannot produce a prompt that overflows simply

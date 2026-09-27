@@ -33,6 +33,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -442,6 +443,15 @@ def load_for_inference(
     import transformers
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
+    # Windows torch builds carry no flash-attention kernel, and with a 4D additive
+    # mask present the SDPA dispatcher can serve attention with the MATH backend,
+    # which materialises the full Lq x Lk weight tensor. Measured on this machine:
+    # 26 GB peak at 4k tokens / batch 4, a 35 GiB single allocation at ~11k tokens
+    # -- an OOM hours into a run. With math off, the memory-efficient kernel serves
+    # the same shapes at ~2.5 GB. If efficient also refuses a shape, failing loudly
+    # beats silently materialising.
+    torch.backends.cuda.enable_math_sdp(False)
+
     # The tokenizer is named by the identity, not derived from the base model: the
     # adapter directory carries the tokenizer it was trained with, and the two can
     # disagree (see TOKENIZER_MARKERS). `identity.tokenizer_source` records which was used.
@@ -502,6 +512,8 @@ def generate_texts(
     temperature: float = 0.0,
     progress: bool = False,
     enable_thinking: bool = True,
+    checkpoint: GenerationCheckpoint | None = None,
+    checkpoint_key: str = "default",
 ) -> list[str]:
     """Generate one response per conversation, in order.
 
@@ -526,12 +538,15 @@ def generate_texts(
             produced 0/64 parseable rows, every one truncated mid-JSON). Off
             prefills an empty think block, which also matches the SFT target
             shape the adapter was trained toward.
+        checkpoint: Append-only record of completed generations. When given,
+            finished rows survive a crash: on restart the same checkpoint path
+            returns them and only the unfinished rows are generated. An
+            hours-long decode is not repeatable on demand; its intermediate
+            state must not live only in process memory.
 
     Returns:
-        The decoded continuations, with the prompt removed.
+        The decoded continuations, with the prompt removed, in input order.
     """
-    import torch
-
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"  # left padding for decoder-only generation
@@ -539,20 +554,72 @@ def generate_texts(
     if not do_sample:
         temperature = 1.0
 
-    outputs: list[str] = []
+    done: dict[int, str] = {}
+    if checkpoint is not None:
+        done = checkpoint.completed(checkpoint_key)
+    outputs: list[str] = [""] * len(conversations)
+    for index, text in done.items():
+        outputs[index] = text
+    pending = [(i, c) for i, c in enumerate(conversations) if i not in done]
+
     template_kwargs = _chat_template_kwargs(tokenizer, enable_thinking)
-    for start in range(0, len(conversations), batch_size):
-        batch = conversations[start : start + batch_size]
-        rendered = [
-            tokenizer.apply_chat_template(
-                item, tokenize=False, add_generation_prompt=True, **template_kwargs
-            )
-            for item in batch
-        ]
-        encoded = tokenizer(rendered, return_tensors="pt", padding=True, add_special_tokens=False)
-        encoded = {key: value.to(model.device) for key, value in encoded.items()}
-        prompt_length = encoded["input_ids"].shape[1]
+    for start in range(0, len(pending), batch_size):
+        chunk = pending[start : start + batch_size]
+        indices = [i for i, _ in chunk]
+        batch = [c for _, c in chunk]
         batch_started = time.monotonic()
+        texts = _generate_batch(
+            model,
+            tokenizer,
+            batch,
+            max_new_tokens=max_new_tokens,
+            do_sample=do_sample,
+            temperature=temperature,
+            template_kwargs=template_kwargs,
+        )
+        for i, text in zip(indices, texts, strict=True):
+            outputs[i] = text
+        if checkpoint is not None:
+            checkpoint.extend(checkpoint_key, list(zip(indices, texts, strict=True)))
+        if progress:
+            logger.info(
+                "generated %d/%d (%.1fs this batch)",
+                len(done) + start + len(chunk),
+                len(conversations),
+                time.monotonic() - batch_started,
+            )
+    return outputs
+
+
+def _generate_batch(
+    model: Any,
+    tokenizer: Any,
+    batch: Sequence[list[dict[str, str]]],
+    *,
+    max_new_tokens: int,
+    do_sample: bool,
+    temperature: float,
+    template_kwargs: dict[str, Any],
+) -> list[str]:
+    """Decode one batch, halving it on CUDA OOM rather than losing the run.
+
+    The memory peak scales with the longest prompt in the batch, and prompt
+    lengths vary widely -- one over-long row must not cost every row around it.
+    A single-row batch that still OOMs re-raises: retrying a genuinely too-large
+    row would loop forever.
+    """
+    import torch
+
+    rendered = [
+        tokenizer.apply_chat_template(
+            item, tokenize=False, add_generation_prompt=True, **template_kwargs
+        )
+        for item in batch
+    ]
+    encoded = tokenizer(rendered, return_tensors="pt", padding=True, add_special_tokens=False)
+    encoded = {key: value.to(model.device) for key, value in encoded.items()}
+    prompt_length = encoded["input_ids"].shape[1]
+    try:
         with torch.inference_mode():
             generated = model.generate(
                 **encoded,
@@ -561,15 +628,63 @@ def generate_texts(
                 temperature=temperature,
                 pad_token_id=tokenizer.pad_token_id,
             )
-        outputs.extend(
-            tokenizer.decode(row[prompt_length:], skip_special_tokens=True) for row in generated
+    except torch.OutOfMemoryError:
+        if len(batch) == 1:
+            raise
+        logger.warning(
+            "CUDA OOM on a %d-row batch; retrying as %d single-row batches",
+            len(batch),
+            len(batch),
         )
-        if progress:
-            done = min(start + batch_size, len(conversations))
-            logger.info(
-                "generated %d/%d (%.1fs this batch)",
-                done,
-                len(conversations),
-                time.monotonic() - batch_started,
+        torch.cuda.empty_cache()
+        return [
+            text
+            for row in batch
+            for text in _generate_batch(
+                model,
+                tokenizer,
+                [row],
+                max_new_tokens=max_new_tokens,
+                do_sample=do_sample,
+                temperature=temperature,
+                template_kwargs=template_kwargs,
             )
-    return outputs
+        ]
+    return [
+        tokenizer.decode(row[prompt_length:], skip_special_tokens=True) for row in generated
+    ]
+
+
+class GenerationCheckpoint:
+    """Append-only JSONL of finished generations, surviving a crashed run.
+
+    Each line is ``{"key": <arm>, "i": <row index>, "text": <generation>}``. The
+    caller owns keying (one arm per key) and staleness (fold the run's identity
+    into the file path), so this class stays pure file I/O and is testable
+    without torch.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def completed(self, key: str) -> dict[int, str]:
+        """Rows already recorded for ``key``, as ``{row index: text}``."""
+        if not self.path.exists():
+            return {}
+        done: dict[int, str] = {}
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if record.get("key") == key:
+                done[int(record["i"])] = record["text"]
+        return done
+
+    def extend(self, key: str, items: Sequence[tuple[int, str]]) -> None:
+        """Record newly finished rows. Appends and flushes per call."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.path, "a", encoding="utf-8", newline="\n") as handle:
+            for index, text in items:
+                handle.write(json.dumps({"key": key, "i": index, "text": text}) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())

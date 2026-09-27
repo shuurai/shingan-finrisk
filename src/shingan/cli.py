@@ -18,6 +18,7 @@ Two conventions run through the commands:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -1085,6 +1086,7 @@ def eval_lora(
     )
     from shingan.models.lora import iter_jsonl
     from shingan.models.lora_inference import (
+        GenerationCheckpoint,
         MissingInferenceDependencies,
         attach_adapter,
         describe_model,
@@ -1269,6 +1271,32 @@ def eval_lora(
     # `arms_for_mode` fixes, and the adapter is attached at the single point where the
     # adapter arm begins. Attaching earlier would change the base arm as well.
     horizon = int(project.labels.horizon_days(label))
+    # A checkpoint keyed by everything that would make a stored generation stale:
+    # row identity (order and content of the prompt set), the arm list, and every
+    # generation setting. A different run produces a different fingerprint and
+    # simply starts a new file rather than resuming mismatched rows.
+    run_fingerprint = hashlib.sha256(
+        json.dumps(
+            {
+                "label": label,
+                "split": split,
+                "mode": mode,
+                "arms": arms,
+                "n_rows": len(conversations),
+                "row_ids": sorted(sample_ids.iloc[pos] for pos in contexts),
+                "budget": budget,
+                "max_new_tokens": max_new_tokens,
+                "thinking": thinking,
+                "temperature": temperature,
+                "quantization": identity.quantization,
+                "base_model": identity.base_model,
+                "tokenizer_source": identity.tokenizer_source,
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    checkpoint_path = Path("artifacts") / "lora-eval" / "_checkpoint" / f"{run_fingerprint}.jsonl"
+    checkpoint = GenerationCheckpoint(checkpoint_path)
     outputs_by_arm: dict[str, list[str]] = {}
     attempts_by_arm: dict[str, list[Any]] = {}
     citations_by_arm: dict[str, Any] = {}
@@ -1277,6 +1305,9 @@ def eval_lora(
         if arm == PATH_LORA:
             model = attach_adapter(model, identity)
             console.print(f"attached adapter for {arm}")
+        resumed = len(checkpoint.completed(arm))
+        if resumed:
+            console.print(f"[yellow]resuming {arm}: {resumed} of {len(conversations)} rows already generated[/yellow]")
         outputs = generate_texts(
             model,
             tokenizer,
@@ -1285,6 +1316,8 @@ def eval_lora(
             batch_size=batch_size,
             temperature=temperature,
             enable_thinking=thinking,
+            checkpoint=checkpoint,
+            checkpoint_key=arm,
             # Always on: a multi-hour run with no progress line cannot tell a user
             # "how much longer", which is how a healthy 14 tok/s decode gets mistaken
             # for a hang. --verbose stays for per-row debug decisions.
@@ -1492,6 +1525,12 @@ def eval_lora(
         else paths.artifacts / "lora-eval" / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     )
     written = write_artifact(payload, destination)
+    # The artifact now holds every generation; the checkpoint's purpose is served.
+    # Leaving it would let a *different* future run with the same fingerprint
+    # silently resume rows generated under data that no longer exists.
+    if checkpoint_path.exists():
+        checkpoint_path.unlink()
+        console.print(f"checkpoint served and removed: {checkpoint_path}")
 
     table = Table(title=f"{label} / {split}", title_justify="left")
     # The path column must never be ellipsized. With one arm there was nothing to confuse
