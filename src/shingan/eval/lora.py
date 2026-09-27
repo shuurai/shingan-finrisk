@@ -391,15 +391,18 @@ def document_refs(context: PromptContext) -> set[str]:
     Three shapes resolve, and the choice is not arbitrary:
 
     * ``doc_type date section (accession)`` — the block header's own identity, in the
-      colon form the system prompt teaches and the space form the SFT targets used.
+      colon form the system prompt teaches and the space form the pre-fix SFT targets
+      used.
     * ``doc_type date`` without a section — still identifies *the filing* the excerpt
       was cut from; sections are parts of one document.
     * ``source date`` for news — the header's ``[published=…, source=…]`` pair.
 
     A bare source name ("reuters") deliberately does **not** resolve: it names an
-    outlet, not an article, and the adapter's own SFT targets used exactly that shape.
-    The audit counting those as unresolved is the point — it is the visible trace of
-    the training targets never matching the contract the prompt teaches.
+    outlet, not an article. The first SFT corpus minted exactly that shape in its
+    targets, so an adapter trained on it shows up here — that was the audit finding
+    its mark, and it motivated the target fix: ``pipeline._sft_evidence`` now mints
+    the taught shape, the same ``source_ref`` property the renderer prints. The audit
+    stays so target and contract can never silently drift apart again.
     """
     refs: set[str] = set()
     for excerpt in context.filings:

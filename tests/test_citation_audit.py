@@ -6,13 +6,13 @@ named* — so a fabricated citation passes every gate. These tests pin the audit
 closes that gap: every document-type citation a parsed assessment carries is matched
 against the refs derived from the very context rendered into that row's prompt.
 
-One expectation here is deliberately asymmetric and records a measured fact rather
-than a stylistic preference: the SFT targets mint news references as the bare source
-name (``pipeline._sft_evidence``), while the system prompt teaches the
-``news:source:date`` shape. The audit counts the bare shape as unresolved, because a
-source name identifies an outlet, not an article — so an adapter that reproduces its
-training targets will *show up* here, and that is the visible trace of the contract
-gap, not a defect of the audit.
+History, kept because it is why the target-side test below exists: the first SFT
+corpus minted news references as the bare source name and filing references without
+their section, while the system prompt taught the ``news:source:date`` shape — so an
+adapter faithfully reproducing its training targets was scored as citing documents
+the prompt never contained. ``pipeline._sft_evidence`` now mints the taught shape,
+and :func:`test_sft_targets_cite_in_the_taught_shape` pins target and contract to
+the same ``source_ref`` property so they cannot drift apart again.
 """
 
 from __future__ import annotations
@@ -81,8 +81,60 @@ def test_the_sectionless_filing_form_resolves() -> None:
 
 
 def test_a_bare_source_name_does_not_resolve() -> None:
-    """A source names an outlet, not an article — and the SFT targets used exactly this."""
+    """A source names an outlet, not an article — a citation that vague must not count."""
     assert "reuters" not in document_refs(_context())
+
+
+def test_sft_targets_cite_in_the_taught_shape() -> None:
+    """The SFT evidence mints refs the audit resolves, for both document types.
+
+    Regression pin for the contract gap the first zero-shot run exposed: the targets
+    used to carry a bare outlet name and a section-less filing ref, shapes the audit
+    counts as unresolved. Target and prompt must be one shape.
+    """
+    from shingan.pipeline import _sft_evidence
+
+    context = _context(with_accession=True)
+    context.news[0].body = ""  # headline-only: the quote comes from the title
+    context.filings[0].text = "Liquidity risk factors threaten the credit profile."
+    context.news[0].title = "Markets fall sharply as credit spreads widen"
+
+    refs = document_refs(context)
+    from shingan.eval.lora import _normalize_ref
+
+    for source_type, source_ref, _quote in _sft_evidence(context):
+        # Compare through the audit's own normalisation path, exactly as
+        # ``citation_summary`` does — the taught colon form must resolve.
+        assert _normalize_ref(source_ref) in refs, (source_type, source_ref)
+
+
+def test_sft_quote_verification_survives_headline_only_news() -> None:
+    """A headline-only article must not make the verbatim check fail its own quote.
+
+    The quote is sliced from ``body or title``; the haystack used to be ``body`` only,
+    so an empty body made ``quotes_are_verbatim`` fail — which the builder escalates
+    to a hard error, i.e. the real corpus could not have been rebuilt at all.
+    """
+    from shingan.data.schema import quotes_are_verbatim
+    from shingan.pipeline import _sft_evidence
+    from shingan.prompts import assessment_from_labels
+
+    context = _context()
+    context.news[0].body = ""
+    context.news[0].title = "Markets fall sharply as credit spreads widen beyond warning levels"
+    context.filings = []  # news-only row
+
+    spans = _sft_evidence(context)
+    assert spans, "a headline-only article must still yield one quote"
+    assessment = assessment_from_labels(
+        "tail_risk",
+        score=0.0,
+        horizon_days=30,
+        reasons=["r"],
+        evidence=spans,
+    )
+    documents = [item.body or item.title for item in context.news]
+    assert quotes_are_verbatim(assessment, documents)
 
 
 def test_a_fabricated_ref_is_counted_unresolved_with_an_example() -> None:

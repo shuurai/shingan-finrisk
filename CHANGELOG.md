@@ -18,11 +18,23 @@ The dataset schema and the label definitions are versioned separately via the
   the base model's <think> block grew under the other substrate and the 512-token
   budget ended mid-JSON. Disabling thinking spends the budget on the answer and
   matches the SFT target shape; the choice is recorded in the artifact.
+- SFT evidence targets now cite in the taught shape. The builder minted its own
+  `source_ref` shapes (a bare outlet name for news, a section-less filing ref) while
+  the system prompt teaches `news:source:date` and `10-K:date:section:accession` --
+  so the training targets themselves taught a citation form the prompt forbids and
+  the citation audit records as unresolved. `_sft_evidence` now uses the same
+  `source_ref` property the prompt renderer prints, and a regression test pins
+  target refs through the audit's own normalisation path.
 ### Fixed
 - The prompt character budget translated max_seq_length with a prose density constant
   (3.6 chars/token); the real corpus measures 1.84-2.05, so "within budget" prompts
   were ~7,000 tokens against a 4,096 limit. The constant is now 1.9, measured; SFT
   corpora must be rebuilt at the next retrain.
+- SFT quote verification used the news body as its only haystack while the quote can
+  be sliced from `body or title`: a headline-only article (common in the FNSPID
+  snapshot) failed its own verbatim check, which the builder escalates to a hard
+  error -- the real corpus could not have been rebuilt at all. The haystack now is
+  the same string the quote was sliced from.
 - `eval lora` placed bf16 weights on the CPU unless `lora.device_map` was exactly
   "auto": "single" is training semantics (the Trainer moves the model itself),
   but inference passes device_map straight to `from_pretrained`, whose default

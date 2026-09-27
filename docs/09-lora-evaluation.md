@@ -1065,3 +1065,62 @@ matched 基线，test 616 个 mask-true 行、**32 正样本**，首次越过
 
 重启命令要点：新指纹自动生效；建议 `--batch-size 2`（weights 28 GB + 3.1k token 批 2
 留有余量）；启动验证 `weights placed on: cuda:0`。
+## 18. Step 13 — bf16 零样本跑通 + SFT 引用形状修复（run 20260927T102330Z）
+
+### 18.1 零样本结果（基座 Qwen3-14B，无 adapter，bf16，616 行 / 32 正）
+
+| path | AUC | KS（方向） | PR-AUC | n |
+| --- | --- | --- | --- | --- |
+| structured_matched | 0.5506 | 0.1794（pos_higher） | 0.0595 | 616 |
+| **text_baseline（TF-IDF）** | **0.6731** | 0.4315（pos_higher） | **0.1926** | 616 |
+| text_only_zero_shot | 0.5657 | 0.1320（pos_higher） | 0.0751 | 591 |
+
+配对差值全部跨零（对 text_baseline：AUC -0.1103 [-0.1933, +0.1559]）。判读：
+
+1. **14B 基座裸看不敌词袋**，方向为负。这进一步坐实 §17.2 的防误读：text_baseline
+   的领先是新闻量代理，而连语义模型的裸输出也追不上这个代理——语义价值只能寄望
+   LoRA 臂（重训后）。
+2. **0.5657 不构成结论**：32 正下 CI 全跨零，arm 的效力不足以判生死。这正是零样本
+   行的设计定位——它是"重训后 adapter 是否学到语义"的对照组，不是独立选手。
+3. **25/616 解析失败，全部同因**：模型答了 `default_risk` 标签而请求的是 `tail_risk`
+   ——基座对标签指令的服从不稳定。失败行 0 正样本（不是评测在偷偷丢难样本）。这
+   25 行同时是引用不可审计的 25 行，一一对应。
+4. **引用审计 75/85 解析**：10 条未解析 + 70 条非文档（structured/price/other）。
+   审计器照 prompt 教的形状解析；10 条未解析里包括了模型模仿旧 SFT 目标形状的输出
+   ——见 §18.2，这个缺口已从源头关闭。
+
+### 18.2 SFT 引用形状修复：目标与契约必须同一个形状
+
+§18.1 的审计暴露了一个从第一版 SFT 语料就存在的契约裂缝：`pipeline._sft_evidence`
+铸造目标引用时**自创形状**——news 用裸媒体名（`reuters`），filing 用无 section 的
+`accession or "10-K 2019-02-26"`——而系统 prompt 教的是 `news:source:date` 与
+`10-K:date:section:accession`。也就是说：**训练目标本身在教模型使用 prompt 明文禁止、
+审计器必记 unresolved 的引用形状**。adapter 忠实复现训练目标，就会在审计里显形。
+
+修复（一处函数 + 两处连带）：
+
+1. `_sft_evidence` 改用与 prompt 渲染器**同一个** `source_ref` 属性（filing 含
+   section 与 accession，news 为 `news:source:date`）——目标与块头一字不差。
+2. 连带修复一个会让真实重建直接崩溃的雷：引文可取自 `body or title`（headline-only
+   新闻取 title），但逐字校验的 haystack 只放了 `body`——空 body 使
+   `quotes_are_verbatim` 必假，builder 按"拒绝教造引文"的纪律硬失败。haystack 改为
+   与引文来源同串。
+3. `document_refs` 与 `test_citation_audit.py` 的"这是测得的事实不是缺陷"注释改写：
+   裸媒体名不解析的语义不变，但"SFT 目标正是这个形状"已成历史；新增
+   `test_sft_targets_cite_in_the_taught_shape`（目标引用必须过审计的 normalize 路径）
+   与 `test_sft_quote_verification_survives_headline_only_news` 两个回归钉。
+
+### 18.3 重建与重训
+
+`data sft --data-config configs/data/stage2_real.yaml` 重建：tail_risk train 779（4 正）
+/ valid 323（1 正），test 按设计不进 SFT。全 1,113 条引用 100% taught shape、0 条残留
+（脚本核验）；1085/1102 条 prompt 触发 5,982 字符预算截断——4096 窗口下的既定纪律，
+计数记录于 meta.truncated 与 manifest，两侧（SFT 与 eval）同预算，不存在口径差。
+
+重训命令（与旧合成 adapter 分目录，不覆盖）：
+
+    python -m shingan train lora --output-dir artifacts/lora-real
+
+旧 adapter（`artifacts/lora`，合成语料、108 步 / 42min）保留作对照；新语料 779 例 ×
+3 epochs，预计 55–70 分钟。重训完成后跑 `eval run`，`text_only_lora` 行首次可产出——
+"文本语义有无增量"的最终裁判。

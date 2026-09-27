@@ -370,17 +370,28 @@ def _sft_evidence(context: PromptContext) -> list[tuple[str, str, str]]:
 
     ``(source_type, source_ref, quote)`` triples, in the shape
     :func:`~shingan.prompts.assessment_from_labels` expects.
+
+    The ``source_ref`` is the *taught* shape: the ``source_ref`` property of the very
+    object rendered into the prompt's block header. The first version of this function
+    minted its own shapes instead — a bare outlet name for news (``reuters``) and an
+    accession-or-date string for filings — so every training target cited documents in
+    a form the system prompt forbids and the citation audit records as unresolved. An
+    adapter reproducing its training targets will emit those refs, so the target and
+    the contract must be one shape, and it must be the prompt's.
     """
     spans: list[tuple[str, str, str]] = []
     for excerpt in context.filings[:1]:
         quote = _first_verbatim_quote(excerpt.text)
         if quote is not None:
-            reference = excerpt.accession or f"{excerpt.doc_type} {excerpt.filed.isoformat()}"
-            spans.append((SourceType.FILING.value, reference, quote))
+            spans.append((SourceType.FILING.value, excerpt.source_ref, quote))
     for item in context.news[:1]:
+        # The quote is sliced from the same string that verifies it: a headline-only
+        # article quotes the title, and the haystack must be that title, not the empty
+        # body — the old body-only haystack made the verification raise on exactly the
+        # rows the real news corpus is full of.
         quote = _first_verbatim_quote(item.body or item.title)
         if quote is not None:
-            spans.append((SourceType.NEWS.value, item.source or "news", quote))
+            spans.append((SourceType.NEWS.value, item.source_ref, quote))
     return spans
 
 
@@ -516,8 +527,10 @@ def sft_examples(
                         ]
                     ),
                 )
+                # Same strings the quotes were sliced from — including the title for
+                # headline-only news, whose body is empty (see `_sft_evidence`).
                 documents = [excerpt.text for excerpt in context.filings] + [
-                    item.body for item in context.news
+                    item.body or item.title for item in context.news
                 ]
                 if target.evidence and not quotes_are_verbatim(target, documents):
                     # Impossible while `_first_verbatim_quote` slices from these very
