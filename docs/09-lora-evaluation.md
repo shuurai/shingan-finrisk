@@ -976,6 +976,13 @@ vs 4-bit 479 s/行（≈3 倍，低于理想 5 倍，prefill 占比高）。
 4. 真实 677 行重跑建议 `--no-thinking`（预计 ~60–90 s/行，一晚可完），artifacts
    的 `generation.thinking` 字段如实记录该选择。
 
+**追加发现（比 think 块更根本）**：这次 bf16 run 其实跑在 **CPU** 上。config 的
+`lora.device_map: single` 是训练语义（Trainer 自己搬模型）；推理端把它翻译成
+`device_map=None`，而无量化配置时 `from_pretrained` 的默认落点是 CPU。4-bit run
+没暴露是因为 bitsandbytes 强制 CUDA、transformers 自动放 GPU——于是"bf16 提速 3 倍"
+实为"CPU bf16 vs GPU 4-bit"。修法：eval 端只有显式 `cpu` 才落 CPU，`single`/`auto`
+都放可见的加速器；**payload 的 `model.device` 现在记录权重实际运行设备**——设备
+不记录，CPU 冒充 GPU 几小时无人可知，这与"记录值不得与加载值漂移"是同一条纪律。
 ### 16.2 `placebo_corpus.py` 补写 `manifest.json`
 
 `training_data_block`（Step 9）在训练文件旁找 `manifest.json` 并内嵌进 run.json 的

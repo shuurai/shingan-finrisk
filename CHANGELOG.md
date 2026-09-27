@@ -19,6 +19,12 @@ The dataset schema and the label definitions are versioned separately via the
   budget ended mid-JSON. Disabling thinking spends the budget on the answer and
   matches the SFT target shape; the choice is recorded in the artifact.
 ### Fixed
+- `eval lora` placed bf16 weights on the CPU unless `lora.device_map` was exactly
+  "auto": "single" is training semantics (the Trainer moves the model itself),
+  but inference passes device_map straight to `from_pretrained`, whose default
+  is CPU. 4-bit runs never noticed because bitsandbytes forces CUDA. Eval now
+  maps only an explicit "cpu" to CPU and records the weights' actual device in
+  the artifact payload.
 - `eval lora` per-batch progress lines reported ~0.0s: the timer started after
   `generate()` returned. It now brackets the generation call.
 - `EvaluationReport.text_corpus` carries the raw text-source row counts (news rows,

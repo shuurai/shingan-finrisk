@@ -1248,15 +1248,22 @@ def eval_lora(
         return
 
     try:
+        # "single" is a *training* placement (the Trainer moves the model itself).
+        # Inference has no trainer: device_map=None leaves from_pretrained's default,
+        # which is CPU -- how a bf16 "speedup" silently ran on CPU for a whole
+        # corpus. For eval, only an explicit "cpu" means CPU; "single" and "auto"
+        # both mean "place on the accelerator when one is visible".
+        device_map = "none" if project.lora.device_map == "cpu" else "auto"
         model, tokenizer = load_for_inference(
             identity,
-            device_map="auto" if project.lora.device_map == "auto" else "none",
+            device_map=device_map,
             attn_implementation=project.lora.attn_implementation,
             load_in_4bit=effective_4bit,
             compute_dtype=project.lora.bnb_4bit_compute_dtype,
         )
     except MissingInferenceDependencies as exc:
         _fail(str(exc))
+    console.print(f"weights placed on: {next(model.parameters()).device}")
 
     # One prompt set, one tokenizer, one model object: the arms are generated in the order
     # `arms_for_mode` fixes, and the adapter is attached at the single point where the
@@ -1446,7 +1453,13 @@ def eval_lora(
         rows=rows,
         scored=scored,
         arms=arms,
-        model=identity.as_dict(),
+        model={
+            **identity.as_dict(),
+            # Where the weights actually ran. A recorded quantisation that drifts
+            # from the loaded one is a provenance bug; so is a device nobody
+            # recorded, which is how a CPU run passed for a fast GPU run.
+            "device": str(next(model.parameters()).device),
+        },
         generation={
             "policy": "greedy" if temperature <= 0 else "sampled",
             "temperature": temperature,
