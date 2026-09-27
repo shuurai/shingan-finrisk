@@ -12,6 +12,15 @@ The dataset schema and the label definitions are versioned separately via the
 ## [Unreleased]
 
 ### Added
+- `shingan eval lora --thinking/--no-thinking` forwards `enable_thinking` to the
+  chat template (only when the template itself supports the variable). A bf16
+  re-run of a corpus the 4-bit run parsed 64/64 produced 0/64 parseable rows:
+  the base model's <think> block grew under the other substrate and the 512-token
+  budget ended mid-JSON. Disabling thinking spends the budget on the answer and
+  matches the SFT target shape; the choice is recorded in the artifact.
+### Fixed
+- `eval lora` per-batch progress lines reported ~0.0s: the timer started after
+  `generate()` returned. It now brackets the generation call.
 - `EvaluationReport.text_corpus` carries the raw text-source row counts (news rows,
   filing sections) into the report payload, and the section-9 note about what the
   TF-IDF baseline actually sees is now generated from them instead of asserting

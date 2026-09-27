@@ -995,6 +995,17 @@ def eval_lora(
     temperature: Annotated[
         float, typer.Option("--temperature", help="0 for greedy; anything else samples.")
     ] = 0.0,
+    thinking: Annotated[
+        bool,
+        typer.Option(
+            "--thinking/--no-thinking",
+            help="Keep the chat template's reasoning mode. Qwen3's base model can spend "
+            "hundreds of tokens in <think> before the JSON answer; under a 512-token cap "
+            "that truncates the answer into an unparseable fragment. --no-thinking prefills "
+            "an empty think block (template-supported models only), which also matches the "
+            "SFT target shape. Default on, so scores stay comparable with earlier runs.",
+        ),
+    ] = True,
     load_in_4bit: Annotated[
         bool | None,
         typer.Option(
@@ -1266,6 +1277,7 @@ def eval_lora(
             max_new_tokens=max_new_tokens,
             batch_size=batch_size,
             temperature=temperature,
+            enable_thinking=thinking,
             # Always on: a multi-hour run with no progress line cannot tell a user
             # "how much longer", which is how a healthy 14 tok/s decode gets mistaken
             # for a hang. --verbose stays for per-row debug decisions.
@@ -1440,6 +1452,7 @@ def eval_lora(
             "temperature": temperature,
             "max_new_tokens": max_new_tokens,
             "batch_size": batch_size,
+            "thinking": thinking,
         },
         prompt={
             "integrity": integrity.as_dict() if integrity is not None else {"checked": False},

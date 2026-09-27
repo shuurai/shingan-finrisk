@@ -49,6 +49,7 @@ from shingan.models.lora_inference import (
     MODE_ADAPTER,
     MODE_BOTH,
     MODE_ZERO_SHOT,
+    _chat_template_kwargs,
     attach_adapter,
     describe_model,
     load_for_inference,
@@ -393,3 +394,39 @@ def test_arms_that_disagree_with_the_runs_are_refused() -> None:
 def test_a_run_with_no_arms_is_refused() -> None:
     with pytest.raises(ValueError, match="no arm was scored"):
         zero_shot_payload([], {})
+
+
+# -- the thinking flag reaches the chat template only where it is supported ----
+
+
+class _FakeTokenizer:
+    def __init__(self, chat_template: str | None) -> None:
+        self.chat_template = chat_template
+
+
+def test_thinking_on_sends_nothing():
+    assert _chat_template_kwargs(_FakeTokenizer("enable_thinking"), True) == {}
+
+
+def test_no_thinking_reaches_a_template_that_knows_the_variable():
+    template = "{% if enable_thinking is defined %}...{% endif %}"
+    assert _chat_template_kwargs(_FakeTokenizer(template), False) == {"enable_thinking": False}
+
+
+def test_no_thinking_is_dropped_for_a_template_that_does_not_know_it():
+    # The kwarg would be rendered as literal text inside the prompt.
+    assert _chat_template_kwargs(_FakeTokenizer("plain template"), False) == {}
+
+
+def test_no_thinking_is_dropped_without_a_template():
+    assert _chat_template_kwargs(_FakeTokenizer(None), False) == {}
+
+
+def test_cli_exposes_the_thinking_flag():
+    from typer.testing import CliRunner
+
+    from shingan.cli import app
+
+    result = CliRunner().invoke(app, ["eval", "lora", "--help"])
+    assert result.exit_code == 0
+    assert "--no-thinking" in result.output and "--thinking" in result.output

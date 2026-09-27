@@ -956,6 +956,26 @@ bf16 加载省掉这一层，解码快数倍。代价是显存：14B bf16 约 28
 第一次换 bf16 时，先用 `--limit 12 --no-load-in-4bit` 与既有 4-bit 产物的对应行对比——
 预期多数行同分、个别行漂移；若系统性翻转，停下来查，不要直接替换 69.5 小时的数字。
 
+**纪律条款的第一次实战（2026-09-26，run 20260926T173000Z）**：同一批合成 64 行，
+4-bit 产物解析 64/64，bf16 解析 **0/64**——全部 `no JSON object found`，原始输出在
+512 token 预算内只写到 JSON 的第 3 个字符。根因不是精度漂移本身，而是它的放大器：
+Qwen3 基座在 bf16 下的 `<think>` 推理块显著变长，推理耗尽预算后 JSON 被截断
+（4-bit 下 think 较短、17 行截断但 JSON 已完整）。速度方面 bf16 实测约 160 s/行
+vs 4-bit 479 s/行（≈3 倍，低于理想 5 倍，prefill 占比高）。
+
+结论与对策：
+1. **基座漂移是实锤的**——贪心输出跨基座不可逐行比较，bf16 与 4-bit 的分数差
+   不能解读为"量化影响排序"，只能解读为"贪心解码不稳定"。行级保真度检查在
+   该模型上无法廉价达成，放弃该检查。
+2. 新增 `--thinking/--no-thinking`（`generate_texts(enable_thinking=)`）：关掉后
+   模板预填空 `<think></think>`，预算全部给 JSON——同时也与 SFT 目标形状一致
+   （adapter 臂实测本来就输出空 think）。模板不支持该变量的 tokenizer 上此选项
+   是 no-op（变量名只在该模板自己引用时传入，否则会被渲染成字面文本）。
+3. 顺带修进度计时 bug：`batch_started` 原在 `generate()` 之后取样，"0.0s this
+   batch" 实为纯后处理耗时；已移到 generate 之前。
+4. 真实 677 行重跑建议 `--no-thinking`（预计 ~60–90 s/行，一晚可完），artifacts
+   的 `generation.thinking` 字段如实记录该选择。
+
 ### 16.2 `placebo_corpus.py` 补写 `manifest.json`
 
 `training_data_block`（Step 9）在训练文件旁找 `manifest.json` 并内嵌进 run.json 的

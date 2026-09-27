@@ -476,6 +476,22 @@ def load_for_inference(
     return model, tokenizer
 
 
+def _chat_template_kwargs(tokenizer: Any, enable_thinking: bool) -> dict[str, Any]:
+    """Kwargs for ``apply_chat_template``, guarded by template support.
+
+    Qwen3's template accepts ``enable_thinking`` and, when False, prefills an
+    empty ``<think></think>`` so the budget is spent on the JSON answer instead
+    of reasoning. Passing the kwarg to a template that does not know the
+    variable renders it as literal text inside the prompt, so the name only
+    goes in when the template itself references it.
+    """
+    if enable_thinking or not getattr(tokenizer, "chat_template", None):
+        return {}
+    if "enable_thinking" in tokenizer.chat_template:
+        return {"enable_thinking": False}
+    return {}
+
+
 def generate_texts(
     model: Any,
     tokenizer: Any,
@@ -485,6 +501,7 @@ def generate_texts(
     batch_size: int = 4,
     temperature: float = 0.0,
     progress: bool = False,
+    enable_thinking: bool = True,
 ) -> list[str]:
     """Generate one response per conversation, in order.
 
@@ -502,6 +519,13 @@ def generate_texts(
         batch_size: Rows per forward pass. Lower it if the card runs out of memory.
         temperature: 0 for greedy. Anything else enables sampling.
         progress: Log a line per batch.
+        enable_thinking: Keep the chat template's reasoning mode. Qwen3's base
+            model spends hundreds of tokens in ``<think>`` before the JSON;
+            under a 512-token cap that can leave no room for the answer at all
+            (observed: a bf16 re-run of a corpus the 4-bit run scored 64/64
+            produced 0/64 parseable rows, every one truncated mid-JSON). Off
+            prefills an empty think block, which also matches the SFT target
+            shape the adapter was trained toward.
 
     Returns:
         The decoded continuations, with the prompt removed.
@@ -516,15 +540,19 @@ def generate_texts(
         temperature = 1.0
 
     outputs: list[str] = []
+    template_kwargs = _chat_template_kwargs(tokenizer, enable_thinking)
     for start in range(0, len(conversations), batch_size):
         batch = conversations[start : start + batch_size]
         rendered = [
-            tokenizer.apply_chat_template(item, tokenize=False, add_generation_prompt=True)
+            tokenizer.apply_chat_template(
+                item, tokenize=False, add_generation_prompt=True, **template_kwargs
+            )
             for item in batch
         ]
         encoded = tokenizer(rendered, return_tensors="pt", padding=True, add_special_tokens=False)
         encoded = {key: value.to(model.device) for key, value in encoded.items()}
         prompt_length = encoded["input_ids"].shape[1]
+        batch_started = time.monotonic()
         with torch.inference_mode():
             generated = model.generate(
                 **encoded,
@@ -533,7 +561,6 @@ def generate_texts(
                 temperature=temperature,
                 pad_token_id=tokenizer.pad_token_id,
             )
-        batch_started = time.monotonic()
         outputs.extend(
             tokenizer.decode(row[prompt_length:], skip_special_tokens=True) for row in generated
         )
