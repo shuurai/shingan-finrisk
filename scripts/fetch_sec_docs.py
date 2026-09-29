@@ -37,6 +37,8 @@ Usage (repository root, project venv)::
     python scripts/fetch_sec_docs.py --limit 5      # smoke test
     python scripts/fetch_sec_docs.py                # full corpus, resumable
     python scripts/fetch_sec_docs.py --rebuild-only # rewrite filings.parquet from cache
+    python scripts/fetch_sec_docs.py --resegment    # re-cut cached docs with the current
+                                                    # segmenter, then rebuild the parquet
     python scripts/fetch_sec_docs.py --report       # coverage summary only
 
 What it writes under ``data/raw/real/``:
@@ -421,6 +423,52 @@ def rebuild_filings(
     return cached, len(frame)
 
 
+def resegment_cache(tasks: list[FilingTask], *, cache_dir: Path) -> None:
+    """Re-run the *current* segmenter over every cached document's full text.
+
+    The cache stores both the raw text and the segmentation computed at fetch time,
+    and :func:`rebuild_filings` faithfully re-emits the stored segmentation -- so a
+    segmenter improvement does not reach the parquet until this runs. That is not a
+    hypothetical: the 2026-09-21 fetch predated the inline-heading detection, 1,722 of
+    2,879 filing rows fell back to ``full`` (the whole document, whose head in newer
+    inline-XBRL filings is hidden-facts tag soup), and the first real adapter eval
+    failed to parse 82% of its generations because the model had been shown and had
+    quoted exactly that soup. The raw text was always good; only the stored cut was
+    stale.
+
+    A document whose re-segmentation is unchanged keeps its cache file untouched, so
+    re-running this is idempotent and cheap.
+    """
+    changed = 0
+    unchanged = 0
+    unreadable = 0
+    for task in tasks:
+        path = cache_dir / task.cache_path
+        if not path.is_file():
+            continue
+        try:
+            record = read_cache(path)
+        except Exception:
+            unreadable += 1
+            continue
+        text = str(record.get("text", ""))
+        sections = segment_items(text)
+        names = sorted(sections)
+        if names == list(record.get("section_names") or []):
+            unchanged += 1
+            continue
+        record["section_names"] = names
+        record["n_sections"] = len(sections)
+        record["sections"] = {label: body for label, body in sorted(sections.items())}
+        record["resegmented_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        write_cache(path, record)
+        changed += 1
+    print(
+        f"resegmented: {changed} document(s) changed, {unchanged} unchanged, "
+        f"{unreadable} unreadable"
+    )
+
+
 def report_coverage(tasks: list[FilingTask], *, cache_dir: Path) -> None:
     """Per-form section resolution rates. This is what says whether the text track is real."""
     import statistics
@@ -490,6 +538,12 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=3, help="Concurrent downloaders (default 3).")
     parser.add_argument("--limit", type=int, default=None, help="Fetch at most N uncached documents.")
     parser.add_argument("--rebuild-only", action="store_true", help="Skip the network entirely.")
+    parser.add_argument(
+        "--resegment",
+        action="store_true",
+        help="Re-run the current segmenter over every cached document before rebuilding "
+        "(implies --rebuild-only: no network). Use after a segmenter improvement.",
+    )
     parser.add_argument("--report", action="store_true", help="Print coverage and exit.")
     parser.add_argument(
         "--allow-partial",
@@ -515,7 +569,10 @@ def main() -> None:
         report_coverage(tasks, cache_dir=cache_dir)
         return
 
-    if not args.rebuild_only:
+    if args.resegment:
+        resegment_cache(tasks, cache_dir=cache_dir)
+
+    if not args.rebuild_only and not args.resegment:
         verify_user_agent(user_agent)
         download(
             tasks,

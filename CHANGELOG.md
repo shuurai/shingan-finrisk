@@ -12,6 +12,16 @@ The dataset schema and the label definitions are versioned separately via the
 ## [Unreleased]
 
 ### Added
+- `scripts/fetch_sec_docs.py --resegment` re-runs the *current* segmenter over every
+  cached document's full text before rebuilding `filings.parquet`. The cache stores the
+  segmentation computed at fetch time, so a segmenter improvement never reached the
+  parquet on its own -- 1,722 of 2,879 filing rows fell back to the unsplit `full`
+  label, and because inline-XBRL filings (2020 onwards) begin with a hidden-facts tag
+  block, 87.9% of evaluation-side filings carried that soup while the training side
+  carried 4.7%. An adapter scored against such prompts quoted the soup and looped on
+  it: 82% of its generations never produced a parseable JSON object. Re-segmentation
+  cuts the soup rate to 1.0% and the `full` fallback to 2.3%; `--rebuild-only` is
+  unchanged (it re-exports the stored segmentation and does not re-segment).
 - `shingan eval lora --thinking/--no-thinking` forwards `enable_thinking` to the
   chat template (only when the template itself supports the variable). A bf16
   re-run of a corpus the 4-bit run parsed 64/64 produced 0/64 parseable rows:
