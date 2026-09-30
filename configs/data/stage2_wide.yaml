@@ -13,10 +13,18 @@
 #   * Extending the window back to 2004-01-01 adds the GFC: on the shipped 34 names the
 #     pre-2010 years hold 43 positives on the filing grid versus 7 in the whole
 #     2010-2019 decade. This is the cheapest lever measured -- only the 2004-2009
-#     documents are new downloads.
+#     documents are new downloads. **It is worth nothing unless `split.train.start`
+#     moves with `data.start`**; that is not a gotcha, it is the one thing the wide
+#     overlay has to change, and the first rebuild that forgot it put all 128 pre-2010
+#     positives in `excluded`.
 #   * Widening the universe to the 180 resolvable names across eleven sectors raises the
 #     filing grid to 12,984 observable rows / 370 positives at the shipped -30%
-#     threshold (train 9,463/168, test 3,521/202) -- and costs ~12,000 documents.
+#     threshold -- and costs ~12,000 documents. `scripts/universe_options.py` quotes
+#     this as "train 9,463/168, test 3,521/202", but its "train" is *everything before
+#     test.start* (train + valid), whereas the builder keeps separate nominal windows.
+#     With train widened to 2004 the builder's own blocks are train 7,307/154,
+#     valid 1,833/12, test 3,521/202 -- and test matches the prediction exactly, which
+#     is the check that the two conventions differ only in that split.
 #
 # Two disclosures travel with this configuration and are not optional reading:
 #
@@ -76,12 +84,22 @@ labels:
   targets: [tail_risk]
 
 split:
-  # Geometry A, unchanged: per_label, purge 45 days, test from 2020-01-01. The test
-  # block keeps its comparability with the runs already recorded in docs/09, and the
-  # train block now spans 2004-2019, which is where the GFC positives land. The test
-  # block remains regime-concentrated (March 2020 dominates it) and must still be
-  # reported per year.
+  # Geometry A, unchanged in the part that carries comparability: per_label, purge 45
+  # days, test from 2020-01-01. The test block is therefore the same period as every
+  # result already recorded in docs/09.
+  #
+  # `train.start` is the one window this overlay has to move, and the first wide
+  # rebuild is what proved it. Moving `data.start` to 2004-01-01 while leaving the
+  # inherited train.start at 2010-01-01 put all 128 pre-2010 positives -- the GFC, 88
+  # of them in 2008 alone -- into `excluded`, where they train nothing and are not
+  # even counted in the acceptance report. The expansion's entire rationale is those
+  # rows (docs/11 section 3), and the config comment below asserted "the train block
+  # now spans 2004-2019" while the builder assigned 2010-01-01 .. 2016-12-31. A window
+  # overlay that widens the data but not the split is a download with no effect.
   per_label: true
   purge_days: 45
+  train:
+    start: 2004-01-01
+    end: 2016-12-31
   test:
     start: 2020-01-01

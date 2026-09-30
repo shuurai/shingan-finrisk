@@ -192,7 +192,10 @@ python scripts/audit_panel.py --panel data/processed/panel.parquet
 
 ## 8. 验收标准（扩池是否成功，用数字判定）
 
-1. panel observable 行 ≥ 10,000，`label_tail_risk` 正样本 ≥ 300；
+1. panel observable 行 ≥ 10,000，**可训练/可评测的正样本（train+valid+test）** ≥ 300；
+   "可训练/可评测"这个限定是 2026-09-30 补的（§10.3）：原来数的是全部 observable 正样本，
+   于是第一次重建报出 "370 / 300 pass"，而其中 128 个躺在 `excluded` 里模型永远碰不到——
+   一个**空洞的 pass**。基线随之从 39 改为 37（另有 2 个在 `purged`）。
 2. train 块可用正样本 ≥ 60（当前 4）；
 3. test 块正样本 ≥ 150（当前 32），且**逐年代报告**（2020 年不应再占 80%）；
 4. 切分门禁（`min_positives_for_metrics`）不再靠 test 勉强过关；
@@ -369,3 +372,74 @@ EDGAR 对**只以 PDF 提交**的申报，是把 PDF 字节 uuencode 后塞进 `
 **守卫比不设防更糟**：它把真标题也一起删（短 10-Q 的标题本来就挨得近），2009+ 可解析掉到
 8,294（-22%）。因此：**不修**。2003-2008 的文本轨保持稀疏，这个上限由 §9.4 的未切分率
 逐次报告，而不是默认它不存在。
+
+## 10. 扩窗没有改变切分窗口（第一次重建发现，2026-09-30）
+
+第一次宽池重建跑通，面板 14,669 行 / 179 个名字 / observable 12,997 / 370 个正样本，
+泄漏扫描干净。按 §8 判定却只有三项过：**train 只拿到 26 个正样本，bar 是 60**。
+
+线索是不对称——**test 逐项吻合预测（3,521 行 / 202 正），train 完全不吻合（预测 168，实际 26）**。
+
+### 10.1 根因：`data.start` 动了，`split.train.start` 没动
+
+`configs/data/stage2_wide.yaml` 把 `data.start` 从 2010-01-01 推到 2004-01-01，但
+`split.train.start` 是从 `configs/default.yaml` 继承下来的 **2010-01-01**。
+`configs/data/stage2_real.yaml` 也从不设置它——那里是自洽的，因为它的 `data.start` 本来就是
+2010。构建器把"落在任何名义窗口之外"的行标成 `excluded`：
+
+| split | observable 行 | 正样本 |
+| --- | ---: | ---: |
+| train | 4,080 | 26 |
+| valid | 1,833 | 12 |
+| test | 3,521 | 202 |
+| purged | 336 | 2 |
+| **excluded** | **3,227** | **128** |
+
+那 128 个 `excluded` 正样本**就是 GFC**：2008 年 **88** 个、2009 年 **33** 个、2006/2007 各 3 个、
+2004 年 1 个。而它们**正是扩窗的全部理由**（§3：2010-2019 那十年只有 19 个正样本，GFC 是这个
+股票池唯一的密集源；为它们多下载了约 2,000 份文档）。配置文件里那句
+"the train block now spans 2004-2019, which is where the GFC positives land"**是假的**——
+构建器给它的是 2010-01-01 .. 2016-12-31。
+
+同时暴露了第二个口径问题。`scripts/universe_options.py` 报的 "train 9,463/168" 里的
+train 是"`test.start` 之前的全部"，即 **train + valid**；构建器有各自独立的名义窗口，
+所以 168 从来不是构建器的 train。两个口径的差正好是 valid 块
+（7,307+1,833 = 9,140 ≈ 9,463；154+12 = 166 ≈ 168），而 **test 3,521/202 逐项吻合**——
+这就是"两个口径只差这一处"的证明。
+
+### 10.2 修法
+
+`split.train: {start: 2004-01-01}`。`test.start` 不动（2020-01-01），purge/embargo 不动，
+所以与 docs/09 已记录结果的可比性由 test 块承担，**变的只是训练期向前延长**。
+预期 train 7,307 / 154。
+
+### 10.3 附带修掉审计脚本自己的一个空洞 pass
+
+criterion 1 原来把**所有** observable 正样本计入总数，于是第一次重建报出
+"positives 370 / 300 **pass**"——而其中 128 个模型永远碰不到。这是一个**空洞的 pass**，
+而且"扩窗"恰好是最容易制造它的动作：它能把总数推过 bar 而不增加任何一个可用行。
+现在：
+
+- 总数只数 `MODEL_SPLITS`（train/valid/test）；基线随之从 39 改成 **37**（4+1+32，
+  另外 2 个在 `purged`）；
+- 新增 `idle_positives()`：落进 `purged`/`excluded` 的正样本超过 10% 时打印 WARNING 并
+  **列出年份**。
+
+改判之后，第一次重建的结论从"3 过 1 败"变成 **2 过 2 败**——这才是真话：
+
+```text
+WARNING: 130 of 370 observable positives (35.1%) fall in `purged`/`excluded`,
+         which no model trains or scores on.
+  years: 2004, 2006, 2007, 2008, 2009, 2016
+  [        pass] observable rows           12,997 / 10,000 (was 1,778)
+  [        FAIL] positives (usable)           240 / 300 (was 37)
+  [        FAIL] train positives               26 / 60 (was 4)
+  [        pass] test positives               202 / 150 (was 32)
+```
+
+### 10.4 教训
+
+与 docs/09 §17、§9.5 同源：**只报总和的指标会被"用不上的行"填满**。凡是要下"变多了"的
+结论，都必须问一句**变多的那部分落在哪个块里**。窗口一类的旋钮尤其危险，因为它改变的是
+行的归属，而汇总计数看不出来。
+
