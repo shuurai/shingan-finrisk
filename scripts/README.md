@@ -60,6 +60,43 @@ versions must be recorded — because a run that trained nothing must not report
 Reasoning and the class of bug this closes: section 2.6 of
 [`docs/04-training.md`](../docs/04-training.md).
 
+## The analysis scripts: the ones that decide something
+
+These do not run the pipeline. They read what it produced and decide whether a claim holds,
+which is why each one prints a verdict next to the numbers it printed them from — a
+displayed value and a judgement that can disagree is the failure mode they exist to avoid.
+
+| Script | The question it decides |
+| --- | --- |
+| `audit_panel.py` | Did the universe expansion meet the acceptance criteria, counted over the blocks a model can actually reach? |
+| `regime_diagnostic.py` | Is `tail_risk` a company event or a market event, and has the label's *meaning* changed between train and test? |
+| `compare_eval_reports.py` | Did the change under test move any metric — and are the two runs even comparable? |
+| `stage2_auc_audit.py` | Is the first Stage 2 AUC a measurement or an artefact of five positives? |
+| `card_values.py` | What goes on the model card, read from the artifacts rather than typed in? |
+
+Two conventions they share, both learned the hard way:
+
+**A missing value is `not measured`, never `0`.** `passed=None`, `not evaluated` and
+`undefined` are deliberate third states. Collapsing them into pass/fail invents a finding
+out of absent data — `audit_panel.py` once reported a hollow pass because a criterion a
+model could not reach was counted as if it could.
+
+**Uncertainty is quoted with the count that produced it.** A point estimate on a rare-event
+label is a statement about the sample as much as the model, so the positive count travels
+with every metric.
+
+```bash
+# the runbook that uses these, in order
+#   docs/11-universe-expansion.md, section 7
+python scripts/audit_panel.py --panel data/processed/panel.parquet
+python scripts/audit_panel.py --help          # acceptance criteria and their baselines
+```
+
+`compare_eval_reports.py` takes a baseline and a candidate report, plus each run's
+evaluation panel dump when the per-year breakdown is wanted. It checks the split definition
+and the test-block counts *before* printing any delta; when they differ the report opens
+with "**No.**" and says the deltas describe two datasets rather than one change.
+
 ## Make equivalence
 
 The `Makefile` targets do the same work, but GNU Make is not installed on Windows by

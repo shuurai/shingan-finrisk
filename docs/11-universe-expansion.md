@@ -189,6 +189,17 @@ python scripts/audit_panel.py --panel data/processed/panel.parquet
 #    未来回撤（没有模型能用它），用来给"市场波动最多能解释多少"定上界；旁边的时点特征才是模型
 #    真正拿得到的。不跑这一步，2020 的弱很容易被误读成"特征不够"。（§13）
 python scripts/regime_diagnostic.py --panel data/processed/panel.parquet
+
+# 7. 改过特征/窗口/SFT 之后，不要靠眼睛比两份评测报告——那是把真实位移和抽样噪声混起来的地方。
+#    这一步先判两版是否可比（划分定义、test 行数、test 正样本数），再逐项给差值，并单独点出
+#    某个年份（这里是 2020，test 正样本的 68%）。不可比的对比会在报告开头直接写 "**No.**"。
+python scripts/compare_eval_reports.py \
+  --baseline data/processed/wide_stage2_premarket/eval_20260930T092143Z.json \
+  --baseline-panel data/processed/wide_stage2_premarket/eval_panel.csv \
+  --candidate artifacts/eval/wide_stage2_mktctx/20260930T102842Z.json \
+  --candidate-panel artifacts/eval/wide_stage2_mktctx/panel.csv \
+  --focus-year 2020 \
+  --out data/raw/analysis/wide_mktctx_comparison.md
 ```
 
 第 1 步之后、第 3 步之前**不要跑 `data build`**：此时 filings.parquet 是元数据态
@@ -651,5 +662,84 @@ train 的 12 个年份里有 11 个年份这个特征是 0.69-0.99。
    在 regime 切换处的**含义不稳定**——要么把标签改成相对市场的（剔除共同因子，但那就不是同一个
    问题了），要么显式按 regime 建模/报告，要么承认这个 test 块测的主要是"外生冲击检测"。
 
+## 14. 市场上下文接上之后的实测：§13 的预测被证实，F1 依然触发（2026-09-30）
 
+§13.5 第 2 条是一个**预测**：「接上时点市场特征救不了 2020」。这一节是它的实测。
 
+两版的划分定义、test 行数、test 正样本数**逐项相同**（3,521 行 / 202 正），所以下面的差值是这次
+改动造成的，不是换了样本。这个前提由脚本自己判、自己印，不靠人记：
+
+```bash
+python scripts/compare_eval_reports.py \
+  --baseline data/processed/wide_stage2_premarket/eval_20260930T092143Z.json \
+  --baseline-panel data/processed/wide_stage2_premarket/eval_panel.csv \
+  --candidate artifacts/eval/wide_stage2_mktctx/20260930T102842Z.json \
+  --candidate-panel artifacts/eval/wide_stage2_mktctx/panel.csv \
+  --focus-year 2020 \
+  --out data/raw/analysis/wide_mktctx_comparison.md
+```
+
+### 14.1 逐路径差值
+
+| path | AUC 前 | AUC 后 | ΔAUC | PR-AUC 前 | PR-AUC 后 | ΔPR-AUC | capture@5 前 | 后 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| structured | 0.5594 | **0.5756** | **+0.0162** | 0.0865 | **0.1048** | **+0.0183** | 0.1238 | **0.1782** |
+| fused | 0.5896 | **0.5965** | +0.0069 | 0.0859 | **0.1057** | +0.0198 | 0.0941 | 0.1089 |
+| structured_matched | 0.5408 | 0.5408 | **+0.0000** | 0.0864 | 0.0864 | +0.0000 | 0.1386 | 0.1386 |
+| text_baseline | 0.5670 | 0.5670 | **+0.0000** | 0.0693 | 0.0693 | +0.0000 | 0.0545 | 0.0545 |
+
+`structured` 涨得最多，而 `capture@5` 从 0.1238 到 0.1782 是这四项里最有操作意义的一格——**打分最高的
+5% 里抓到的正样本比例提高了 44%**。这是「`beta_252d` 是 test 上唯一有信息的市场特征」（§13.5）的
+直接后果，不是新结论。
+
+### 14.2 三条结论，按重要性排序
+
+**1. F1 依然触发，而且这次是"涨了但没涨出可分辨的增量"。**
+
+| | 基线 | 市场上下文 |
+| --- | --- | --- |
+| fused − structured PR-AUC | −0.0006 [−0.0343, 0.0242] | **+0.0009 [−0.0673, 0.0511]** |
+
+点估计从负转正，但**区间变宽了**，仍然跨零。机制是清楚的：市场特征抬高了 structured，于是文本轨
+能提供的**边际**信息更少，而不是更多。**这比原来那条结论更强**——原来「文本没增量」还有"structured
+太弱所以融合空间大"这个借口，现在 structured 更强了，增量反而更接近零。
+
+**2. 所有 13 个 gate 的判定一个都没变。** `headline_auc` 0.5965（要 > 0.75）、`headline_ks` 0.1678
+（要 > 0.30）、`calibration_ece` 0.0508（要 < 0.05）、`brier_beats_base_rate` −0.0452（要 > 0）全部
+仍然 FAIL。改特征不等于过门槛，这一条要写下来，免得下次把「+0.0162」读成进展。
+
+**3. 2020 没有被救，§13 的判断成立且因此更强。**
+
+| path | 2020 AUC 前 | 2020 AUC 后 | Δ |
+| --- | ---: | ---: | ---: |
+| structured | 0.3303 | 0.3466 | +0.0163 |
+| fused | 0.5088 | 0.5288 | +0.0200 |
+
+2020 占 test 正样本的 **68.3%**（138/202），而两个路径在该年仍然**不超过抛硬币**。关键在于**这次模型
+手里已经有 `vix_level`、`vix_chg_5d`、`beta_252d` 了**。所以 2020 的失败**不是"看不到市场"**，
+而是 §13.3 那个符号翻转：崩前波动率低、崩后波动率高，而标签在**崩的那一刻**产生。往模型里塞再多
+**水平型**市场特征，都不会改变这一点。
+
+### 14.3 一条内部一致性检查，以及新特征自己的漂移
+
+`text_baseline` 与 `structured_matched` 的 ΔAUC **恰好是 0.0000**。这不是巧合，是一次有用的阴性
+对照：文本轨喂的是渲染后的 prompt，而 `PROMPT_SIGNAL_COLUMNS` 不包含任何市场列，所以只改结构化
+特征矩阵**不应该**动到文本轨。它没动。
+
+漂移因此多了一个成员，而且是最显眼的一个：
+
+| | 基线 | 市场上下文 |
+| --- | ---: | ---: |
+| PSI 超阈值的特征数 | 3 | **4** |
+| 最大 PSI | 0.3625 | **0.6788**（`vix_level`） |
+
+`vix_level` 之前全是 NaN、不参与漂移计算，现在有了值，于是它成了**全表漂得最厉害的特征**。train
+（2004-2016）与 test（2020-2024）的 VIX 水平分布本来就差得远。这既是「它为什么有点用」的解释，
+也是「它为什么救不了 2020」的解释——**同一个数字支撑两条结论**，不要只引对自己有利的那半条。
+
+### 14.4 runbook
+
+`scripts/compare_eval_reports.py` 的调用已加进本节 step 7。它**先判可比性再算差值**：
+划分定义、test 行数、test 正样本数任一不同，报告开头就直接写「**No.**」，并说明差值描述的是两个样本
+而不是一次改动。判据沿用 `shingan.eval.metrics` 自己的 `MIN_POSITIVES`/`MIN_NEGATIVES`，不另立门槛
+——否则会出现「报告说不确定、对比脚本却打了个 0.5」这种自相矛盾。
