@@ -69,6 +69,7 @@ displayed value and a judgement that can disagree is the failure mode they exist
 | Script | The question it decides |
 | --- | --- |
 | `audit_panel.py` | Did the universe expansion meet the acceptance criteria, counted over the blocks a model can actually reach? |
+| `audit_prompt_tokens.py` | Does the built SFT corpus fit the sequence limit, and what would a larger budget admit? Measures with the real tokenizer; no GPU, no model load. |
 | `regime_diagnostic.py` | Is `tail_risk` a company event or a market event, and has the label's *meaning* changed between train and test? |
 | `compare_eval_reports.py` | Did the change under test move any metric — and are the two runs even comparable? |
 | `stage2_auc_audit.py` | Is the first Stage 2 AUC a measurement or an artefact of five positives? |
