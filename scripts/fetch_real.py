@@ -128,15 +128,15 @@ def load_overlay_config(overlay: Path) -> ProjectConfig:
     return load_config(ROOT / "configs" / "default.yaml", [overlay], root=ROOT)
 
 
-def fetch_prices(
+def fetch_symbols(
     config: ProjectConfig,
-    out_dir: Path,
+    symbols: list[str],
     *,
     sleep_seconds: float = 15.0,
     max_retries: int = 3,
     backoff_seconds: float = 90.0,
 ) -> pd.DataFrame:
-    """Daily adjusted OHLCV via the existing yfinance adapter, politely.
+    """Daily adjusted OHLCV for an explicit symbol list, politely.
 
     One ticker per request with a deliberate pause between them, plus exponential-ish
     backoff on rate limiting. A single 10-ticker batch request is what got this IP
@@ -153,7 +153,7 @@ def fetch_prices(
     frames: list[pd.DataFrame] = []
     failed: list[str] = []
 
-    for position, ticker in enumerate([str(item) for item in config.data.universe]):
+    for position, ticker in enumerate(symbols):
         for attempt in range(max_retries + 1):
             try:
                 # cache_dir=None: the adapter names its cache file by date range only,
@@ -181,7 +181,7 @@ def fetch_prices(
                 print(f"  ! {ticker}: {message}")
                 failed.append(ticker)
                 break
-        if position < len(config.data.universe) - 1:
+        if position < len(symbols) - 1:
             time.sleep(sleep_seconds)
 
     if failed:
@@ -193,6 +193,38 @@ def fetch_prices(
     combined = pd.concat(frames, ignore_index=True)
     print(f"prices: {len(combined)} rows, {combined['ticker'].nunique()} tickers fetched")
     return combined
+
+
+def market_symbol_list(config: ProjectConfig) -> list[str]:
+    """The index symbols ``data.market_symbols`` declares, in a stable order."""
+    return [str(symbol) for symbol in config.data.market_symbols.values() if symbol]
+
+
+def fetch_prices(
+    config: ProjectConfig,
+    out_dir: Path,
+    *,
+    sleep_seconds: float = 15.0,
+    max_retries: int = 3,
+    backoff_seconds: float = 90.0,
+) -> pd.DataFrame:
+    """The universe, plus the index symbols ``data.market_symbols`` names.
+
+    The index symbols ride the same loop so the price table stays one file, but they are
+    not universe members: they get no decision-grid row and no filing is ever requested
+    for them (the filing fetch walks the universe, not this list).
+    """
+    market_symbols = market_symbol_list(config)
+    if market_symbols:
+        print(f"market context symbols: {', '.join(market_symbols)}")
+    targets = [str(item) for item in config.data.universe] + market_symbols
+    return fetch_symbols(
+        config,
+        targets,
+        sleep_seconds=sleep_seconds,
+        max_retries=max_retries,
+        backoff_seconds=backoff_seconds,
+    )
 
 
 #: Candidate CIKs for a wider Stage 2 universe, with the filer name each one should
@@ -600,11 +632,45 @@ def main() -> None:
             " this network was rate limited as a whole; a wide universe may lower it at"
             " its own risk (the fetch reports which tickers came back empty).",
     )
+    parser.add_argument(
+        "--market-symbols-only",
+        action="store_true",
+        help="Fetch only the index symbols named by data.market_symbols, merge them into "
+        "the existing prices.parquet, and stop (no EDGAR work). Adding market context "
+        "must not re-fetch the universe: adjusted closes get revised, so a full refetch "
+        "would change every company series and confound any before/after comparison.",
+    )
     args = parser.parse_args()
 
     config = load_overlay_config(args.data_config)
     out_dir = Path(config.data.cache_dir) if config.data.cache_dir else ROOT / "data" / "raw" / "real"
     tickers = [str(item) for item in config.data.universe]
+
+    if args.market_symbols_only:
+        symbols = market_symbol_list(config)
+        if not symbols:
+            raise SystemExit(
+                f"{args.data_config} declares no data.market_symbols; nothing to fetch. "
+                "Add e.g. market_symbols: {benchmark: '^GSPC', volatility: '^VIX'}."
+            )
+        prices_path = out_dir / "prices.parquet"
+        if not prices_path.is_file():
+            raise SystemExit(f"no {prices_path} to merge into; run the full fetch first")
+        existing = pd.read_parquet(prices_path)
+        print(f"merging {', '.join(symbols)} into {prices_path} ({len(existing)} existing rows)")
+        fetched = fetch_symbols(
+            config, symbols, sleep_seconds=args.price_sleep_seconds
+        )
+        # Replace rather than append: re-running must be idempotent, and a duplicated
+        # index series would make market_context_frames pick an arbitrary one of them.
+        kept = existing.loc[~existing["ticker"].astype(str).isin(symbols)]
+        merged = pd.concat([kept, fetched], ignore_index=True)
+        write_frames(out_dir, prices=merged)
+        print(
+            f"prices: {len(kept)} company rows kept, {len(fetched)} index rows added, "
+            f"{merged['ticker'].nunique()} tickers total"
+        )
+        return
 
     print(f"universe: {', '.join(tickers)}  window {config.data.start}..{config.data.end}")
 

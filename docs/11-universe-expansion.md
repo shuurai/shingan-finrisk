@@ -501,4 +501,80 @@ missing`），所以"重训后 LoRA 臂不再是常数"仍待验证。而 docs/0
 扩池现在完成，该触发条件已满足。宽池 SFT 语料已在 `data/processed/sft_stage2_wide`
 （train 7,307 / 154 正）。
 
+## 12. 市场上下文从未接上：同一个接缝上的两个 bug（2026-09-30）
+
+§11 的报告说 7 个特征"在训练块内没有任何观测"而被丢弃，其中 `vix_level`、`vix_chg_5d`、
+`beta_252d` 三个是市场上下文。而模型的表现恰好指向同一方向：2020（占 test 正样本 68%）
+AUC 0.5088，covid_crash 期 0.4534 且 `negatives_higher`。**一个分不清"这家公司在恶化"和
+"整个市场在跌"的模型，看起来就是这样。**
+
+追下去发现这不是缺数据源，而是同一个接缝上的**两个 bug**——各自单独就足以让这三个特征
+永远是 NaN。报告里那句 remedy（"one extra symbol: fetch ^VIX alongside the universe"）
+**即使照做也不会有任何效果**。
+
+### 12.1 bug 1：builder 从不传参数
+
+`compute_technical_features` 一直有 `market_returns` 与 `macro` 两个参数，而
+`data/builder.py` 的调用**一个都没传**：
+
+```python
+technical = compute_technical_features(
+    tables.prices, min_history_days=..., max_nan_run=...
+)
+```
+
+于是四个外部特征在**每一次真实运行**里都是结构性 NaN。
+
+### 12.2 bug 2：`_attach_macro` 会撞名——而那段代码从未执行过
+
+补上传参后才露出第二层。`compute_technical_features` 会**预先为每个外部特征建 NaN 列**，
+`_attach_macro` 又用 `merge_asof` 把 `vix_level` 合进来；同名相撞，pandas 给两边加后缀，
+**规范名消失**：
+
+```
+WITH    vix/beta cols: ['beta_252d', 'vix_level_x', 'vix_chg_5d_x', 'vix_level_y', 'vix_chg_5d_y']
+WITHOUT vix/beta cols: ['beta_252d', 'vix_level', 'vix_chg_5d']
+```
+
+值都在，但**没有任何下游代码会去找 `vix_level_y`**。这个 bug 谁也看不见，因为 bug 1 让这段
+分支成了死代码——**两个 bug 分别位于同一个接缝的两端，各自都足够致命**。
+
+### 12.3 修法
+
+1. **`data.market_symbols`（新，角色闭集）**：`benchmark` 喂 `beta_252d`，`volatility` 喂
+   `vix_level` / `vix_chg_5d`。未知角色是**加载期错误**而不是一个永远 NaN 的列——这正是本
+   节教训的直接落地。
+2. **`builder.market_context_frames()`**（纯函数）：把符号转成那两个参数。角色没配、或符号
+   取不到行，就返回 `None`，特征按实情留 NaN，**不猜、不填默认值**。
+3. **`_attach_macro` 先删占位列再合并**，合并后把缺失的外部特征补回 NaN 列，schema 不随
+   数据源可用性变化。
+4. **`fetch_real.py --market-symbols-only`**：只取索引符号并**合并**进 `prices.parquet`。
+   **不重取整个股票池是硬要求**——复权价会被修订，全量重取会改掉每一条公司序列，从而让
+   "改动前后"的对比失去归因。
+
+### 12.4 实测
+
+`prices.parquet` 的 **862,030 行公司数据逐行不变**，只加 10,568 行指数（`^GSPC` / `^VIX`
+各 5,284 行，2004-01-02 .. 2024-12-30）。真实表上的接缝冒烟：
+
+| 特征 | 修复前 | 修复后（AAPL / GE） |
+| --- | --- | --- |
+| `beta_252d` | 全 NaN | 5,032 / 5,284 非空（前 252 行本就该 NaN） |
+| `vix_level` | 全 NaN | 5,284 / 5,284 |
+| `vix_chg_5d` | 全 NaN | 5,279 / 5,284 |
+| `credit_spread_chg_20d` | 全 NaN | **仍全 NaN**（见 12.5） |
+
+带后缀的列：无。
+
+### 12.5 这一步仍然没有的
+
+- **信用利差** `credit_spread_chg_20d` 需要 FRED 序列（BAA10Y 或 HY OAS），本项目没有这种
+  适配器，所以它**继续按"未测量"处理**，而不是补一个近似值。
+- `turnover_20d` 需要股本（XBRL `dei:EntityCommonStockSharesOutstanding` 可免费恢复）、
+  `sent_mean_30d` / `sent_std_30d` 需要新闻情绪源——都不在这一步里。
+
+修完之后的唯一问题是：**接上市场上下文，2020 的 0.5088 会变好吗？** 面板重建与重评测进行中，
+数字出来之前不预设答案——市场上下文也可能什么也不改变，那同样是结论。
+
+
 

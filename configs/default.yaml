@@ -54,6 +54,20 @@ data:
   sec_max_retries: 4
   sec_timeout_seconds: 30.0
 
+  # Index symbols fetched into the price table for market context. They are never given a
+  # panel row — the decision grid is driven by filings and an index files none — so they
+  # cost one symbol each and nothing else. Empty by default, which leaves `beta_252d`,
+  # `vix_level`, `vix_chg_5d` and `credit_spread_chg_20d` as NaN. That was silently true of
+  # every real run until 2026-09-30: the builder passed neither `market_returns` nor
+  # `macro` into the technical block, so the features were structurally empty and the
+  # model had no way to tell "this company is deteriorating" from "the market fell".
+  #
+  # Recognised roles: `benchmark` (a broad index, feeds beta_252d) and `volatility`
+  # (feeds vix_level and vix_chg_5d). The role set is closed; an unknown role is a
+  # load-time error rather than a feature that stays NaN. Credit spreads are *not* here:
+  # they need a FRED series, not a ticker, and no such adapter exists yet.
+  market_symbols: {}
+
   # Data-quality gates. `max_nan_run` is the longest tolerated gap in a price series
   # (a longer run marks the company's rows as insufficient history); `min_history_days`
   # is the shortest usable price history.

@@ -187,6 +187,11 @@ class SyntheticConfig(_StrictModel):
     )
 
 
+#: Roles ``data.market_symbols`` may declare. A closed set, so a typo is a load-time error
+#: instead of a feature that silently stays NaN.
+MARKET_SYMBOL_ROLES = frozenset({"benchmark", "volatility"})
+
+
 class DataConfig(_StrictModel):
     """Where the panel comes from and how strictly it is assembled."""
 
@@ -220,6 +225,13 @@ class DataConfig(_StrictModel):
         description="Longest tolerated run of missing prices before the whole rolling "
         "feature window in that row is nulled instead of interpolated.",
     )
+    market_symbols: dict[str, str] = Field(
+        default_factory=dict,
+        description="Index symbols fetched into the price table purely for market context, "
+        "never given panel rows: 'benchmark' feeds beta_252d and 'volatility' feeds "
+        "vix_level. Left empty they stay NaN -- which is the state every Stage 2 run "
+        "before 2026-09-30 was silently in, because the builder had no way to pass them.",
+    )
     min_history_days: int = Field(
         default=252,
         ge=1,
@@ -244,6 +256,13 @@ class DataConfig(_StrictModel):
             logger.warning(
                 "data.offline is False but the only source is synthetic; no network "
                 "adapter will be exercised"
+            )
+        unknown_roles = sorted(set(self.market_symbols) - MARKET_SYMBOL_ROLES)
+        if unknown_roles:
+            raise ValueError(
+                f"unknown market_symbols role(s) {unknown_roles}; "
+                f"expected any of {sorted(MARKET_SYMBOL_ROLES)}. A role nothing reads "
+                "would leave its feature NaN with no error at all."
             )
         return self
 

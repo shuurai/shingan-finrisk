@@ -529,13 +529,32 @@ def _attach_macro(features: pd.DataFrame, macro: pd.DataFrame) -> pd.DataFrame:
         macro_frame["credit_spread_chg_20d"] = macro_frame["credit_spread"].astype(float).diff(20)
 
     keep = ["date", *[name for name in EXTERNAL_FEATURES if name in macro_frame.columns]]
-    return pd.merge_asof(
-        features.sort_values("as_of"),
+
+    # The feature frame pre-creates every external feature as NaN, so merging a real column
+    # on top of its own placeholder collides and pandas resolves it by suffixing both
+    # sides: the result carries `vix_level_x` and `vix_level_y` and the canonical name
+    # disappears, leaving the values present but unreachable under the name anything
+    # downstream looks for. Drop the placeholders we are about to fill.
+    #
+    # Nothing caught this before because `build_panel` never passed `macro` at all, so this
+    # whole branch was dead code: the wiring was missing at BOTH ends of the same seam.
+    placeholders = [name for name in keep if name in features.columns]
+    left = features.drop(columns=placeholders) if placeholders else features
+
+    merged = pd.merge_asof(
+        left.sort_values("as_of"),
         macro_frame[keep].sort_values("date"),
         left_on="as_of",
         right_on="date",
         direction="backward",
     ).drop(columns=["date"])
+
+    # Keep the schema stable: an external feature the macro source cannot supply stays a
+    # NaN column rather than vanishing from the frame.
+    for name in EXTERNAL_FEATURES:
+        if name not in merged.columns:
+            merged[name] = np.nan
+    return merged
 
 
 def align_to_common_calendar(

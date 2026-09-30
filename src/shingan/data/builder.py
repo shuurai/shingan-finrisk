@@ -406,6 +406,65 @@ def _date_gap(start: date, end: date) -> str:
     return f"up to {max(0, (end - start).days)} days"
 
 
+def market_context_frames(
+    prices: pd.DataFrame, market_symbols: dict[str, str]
+) -> tuple[pd.Series | None, pd.DataFrame | None]:
+    """Turn the configured index symbols into the two arguments the technical block takes.
+
+    ``data.market_symbols`` names symbols fetched into the price table purely for market
+    context. They are never given a panel row, because the decision grid is driven by
+    filings and an index files none. ``benchmark`` becomes ``market_returns``, which feeds
+    ``beta_252d``; ``volatility`` becomes the macro frame's ``vix`` column, from which
+    ``_attach_macro`` derives ``vix_level`` and ``vix_chg_5d``.
+
+    Nothing is inferred. A role that is unset, or whose symbol has no usable close, yields
+    ``None`` for its slot and the dependent features stay NaN. Before this existed the
+    builder passed neither argument, so ``beta_252d``, ``vix_level``, ``vix_chg_5d`` and
+    ``credit_spread_chg_20d`` were *structurally* NaN in every real run: the feature layer
+    supported them and nothing reported that they were empty. The 2026-09-30 wide
+    evaluation surfaced it as seven features "dropped with no observation in the training
+    block", which is what made the model macro-blind and left 2020 indistinguishable from
+    random.
+
+    Args:
+        prices: Long price panel with ``ticker``, ``date`` and ``close``.
+        market_symbols: Role-to-symbol mapping; see ``config.MARKET_SYMBOL_ROLES``.
+
+    Returns:
+        ``(market_returns, macro)``, either of which may be ``None``.
+    """
+    if not market_symbols or prices.empty:
+        return None, None
+    if not {"ticker", "date", "close"}.issubset(prices.columns):
+        return None, None
+
+    def levels(role: str) -> pd.Series | None:
+        symbol = market_symbols.get(role)
+        if not symbol:
+            return None
+        rows = prices.loc[prices["ticker"].astype(str) == str(symbol), ["date", "close"]]
+        rows = rows.dropna(subset=["close"]).sort_values("date")
+        if rows.empty:
+            return None
+        series = pd.Series(
+            rows["close"].to_numpy(dtype=float), index=pd.DatetimeIndex(rows["date"])
+        )
+        return series[~series.index.duplicated(keep="last")]
+
+    benchmark = levels("benchmark")
+    market_returns: pd.Series | None = None
+    if benchmark is not None and len(benchmark) > 1:
+        market_returns = np.log(benchmark).diff().dropna()
+        market_returns.name = str(market_symbols["benchmark"])
+
+    volatility = levels("volatility")
+    macro: pd.DataFrame | None = None
+    if volatility is not None:
+        macro = pd.DataFrame({"date": volatility.index, "vix": volatility.to_numpy()})
+
+    return market_returns, macro
+
+
 def load_cached_tables(config: ProjectConfig) -> RawTables:
     """Load raw tables previously fetched by ``scripts/fetch_real.py``.
 
@@ -555,8 +614,24 @@ def build_panel(
         grid["sector"] = ""
 
     # 2. Technical features, joined backward onto the grid.
+    #    The index symbols are context, not universe: they are read here and never get a
+    #    grid row. Without them `beta_252d` and the VIX columns are structurally NaN.
+    market_returns, macro = market_context_frames(tables.prices, config.data.market_symbols)
+    if config.data.market_symbols and (market_returns is None or macro is None):
+        logger.warning(
+            "data.market_symbols is configured but %s unusable; the dependent features "
+            "stay NaN. A role whose symbol was fetched under a different name is the "
+            "usual cause.",
+            " and ".join(
+                name
+                for name, frame in (("the benchmark series", market_returns), ("the macro frame", macro))
+                if frame is None
+            ),
+        )
     technical = compute_technical_features(
         tables.prices,
+        market_returns=market_returns,
+        macro=macro,
         min_history_days=config.data.min_history_days,
         max_nan_run=config.data.max_nan_run,
     )

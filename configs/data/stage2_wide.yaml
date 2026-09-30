@@ -75,6 +75,17 @@ data:
   sec_user_agent: "shingan-research/0.1 (contact: research@shingan.dev)"
   cache_dir: data/raw/real
 
+  # Market context. The first wide evaluation reported seven features "dropped with no
+  # observation in the training block", including vix_level, vix_chg_5d and beta_252d, and
+  # the model turned out to be indistinguishable from random in 2020 (AUC 0.5088) and
+  # *inverted* in the covid_crash block (0.4534, negatives_higher). A model that cannot
+  # separate "this company is deteriorating" from "the whole market fell" is exactly what
+  # a missing beta and missing volatility would look like. Both are one symbol each, and
+  # neither is ever given a panel row.
+  market_symbols:
+    benchmark: "^GSPC"
+    volatility: "^VIX"
+
 labels:
   # The shipped definition, unchanged on purpose: -30% peak-to-trough over 30 trading
   # days. Loosening it to -25% would raise the train positives from 168 to 292 without
