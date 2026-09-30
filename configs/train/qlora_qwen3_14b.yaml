@@ -51,19 +51,26 @@ lora:
   target_modules: [q_proj, k_proj, v_proj, o_proj]
   bias: none
 
-  # 4096 tokens. A prompt holds the structured signal block plus up to eight filings and
-  # a handful of news items. This is a **content budget, not only a length cap**:
-  # `chars_budget_for_seq_length` turns it into the character budget the prompt's filing
-  # and news sections are trimmed to fit, so the number decides how much source text
-  # reaches the model at all.
+  # 8192 tokens (raised from 4096, 2026-09-30, docs/09 section 21). This is a **content
+  # budget, not only a length cap**: `chars_budget_for_seq_length` turns it into the
+  # character budget the prompt's filing and news sections are trimmed to fit, so the
+  # number decides how much source text reaches the model at all.
+  #
+  #   4096 -> 5,982 chars   median prompt used 42% of the window
+  #   8192 -> 13,764 chars  roughly 2.3x the source text per prompt
   #
   # It therefore has to be passed to the corpus build too, or the two disagree:
   #     python -m shingan data sft --data-config <data overlay> --train-config <this file>
   # Without `--train-config` the corpus is rendered at the *base* config's budget while
-  # the trainer truncates at this one — the corpus silently carrying less text than
-  # either number suggests. `manifest.json` records `max_seq_length`,
+  # the trainer truncates at this one. `manifest.json` records `max_seq_length`,
   # `character_budget` and the `train_config` path that produced them.
-  max_seq_length: 4096
+  #
+  # Known cost, measured before committing to it: the budget-to-token mapping is an
+  # approximation, and the 4096 corpus already held one prompt 47 tokens over. Projected
+  # at the dense measured end (1.84 chars/token) an 8192 corpus lands ~180 tokens over on
+  # its longest rows, so roughly the longest 1% may be clipped by the trainer. Accepted
+  # rather than hidden; re-measure with `scripts/audit_prompt_tokens.py` after the rebuild.
+  max_seq_length: 8192
 
   # -----------------------------------------------------------------------------------
   # Optimisation. lr 1e-4 with cosine decay is the QLoRA convention; the effective
