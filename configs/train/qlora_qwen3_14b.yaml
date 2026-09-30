@@ -52,8 +52,17 @@ lora:
   bias: none
 
   # 4096 tokens. A prompt holds the structured signal block plus up to eight filings and
-  # a handful of news items; `build_sft_examples` reports how many examples overflow
-  # this, and that count is part of the run metadata rather than a silent truncation.
+  # a handful of news items. This is a **content budget, not only a length cap**:
+  # `chars_budget_for_seq_length` turns it into the character budget the prompt's filing
+  # and news sections are trimmed to fit, so the number decides how much source text
+  # reaches the model at all.
+  #
+  # It therefore has to be passed to the corpus build too, or the two disagree:
+  #     python -m shingan data sft --data-config <data overlay> --train-config <this file>
+  # Without `--train-config` the corpus is rendered at the *base* config's budget while
+  # the trainer truncates at this one — the corpus silently carrying less text than
+  # either number suggests. `manifest.json` records `max_seq_length`,
+  # `character_budget` and the `train_config` path that produced them.
   max_seq_length: 4096
 
   # -----------------------------------------------------------------------------------

@@ -430,6 +430,7 @@ def sft_examples(
     labels: list[str] | None = None,
     include_news: bool = True,
     provenance: Mapping[str, Any] | None = None,
+    train_config_path: Path | str | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
     """Supervised fine-tuning records, per split, for every requested label.
 
@@ -581,6 +582,14 @@ def sft_examples(
         "prompts_truncated": truncated,
         "max_seq_length": config.lora.max_seq_length,
         "character_budget": budget,
+        # Which file produced the two numbers above. `max_seq_length` is a training
+        # setting that also governs this corpus, so it lives in the training overlay —
+        # and until `data sft --train-config` existed, that overlay could not reach
+        # here at all. The corpus was then rendered at the base config's limit while
+        # the trainer used the overlay's, two numbers that disagree silently and one
+        # of which the reader would be looking at. Recording the path makes the pair
+        # auditable instead of merely asserted.
+        "train_config": str(train_config_path) if train_config_path is not None else None,
         # The data block travels with the split counts, not beside them: a manifest
         # that says "189 train rows" without saying which panel those rows came from
         # cannot distinguish a synthetic-SFT run from a real one a month later.

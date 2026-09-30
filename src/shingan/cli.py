@@ -18,7 +18,6 @@ Two conventions run through the commands:
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import math
@@ -609,6 +608,7 @@ def data_sft(
     config: ConfigOpt = None,
     data_config: DataConfigOpt = None,
     eval_config: EvalConfigOpt = None,
+    train_config: TrainConfigOpt = None,
     root: RootOpt = None,
     out: Annotated[
         Path | None, typer.Option("--out", help="Directory for the JSONL and its manifest.")
@@ -630,13 +630,18 @@ def data_sft(
     into the training file is the leakage the purge margin exists to prevent. The
     manifest records that decision, along with the target rule, so the choice travels
     with the file.
+
+    ``--train-config`` belongs here because ``lora.max_seq_length`` does. That value
+    sets the prompt's character budget, so the corpus and the trainer have to agree on
+    it; without the overlay the corpus is rendered at the base config's limit and the
+    trainer truncates at the overlay's. The manifest records which file supplied it.
     """
     _configure_logging(verbose)
     project, paths = _load_stack(
         config=config,
         data_config=data_config,
         eval_config=eval_config,
-        train_config=None,
+        train_config=train_config,
         root=root,
     )
 
@@ -655,6 +660,7 @@ def data_sft(
             labels=wanted,
             include_news=not no_news,
             provenance=data_provenance(build.panel, project, data_config_path=data_config),
+            train_config_path=train_config,
         )
     except ValueError as exc:
         _fail(str(exc))
