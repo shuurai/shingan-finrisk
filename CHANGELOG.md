@@ -12,6 +12,22 @@ The dataset schema and the label definitions are versioned separately via the
 ## [Unreleased]
 
 ### Added
+- `configs/data/stage2_wide.yaml` + `configs/universes/wide_stage2.txt`: the positives
+  expansion. The shipped configuration trains on 4 usable positives and a 14B SFT run on
+  that count produced a constant answer (docs/09 section 20), so the corpus is rebuilt
+  with 180 names over 2004-2024 instead of 34 over 2010-2024 -- measured at 12,984
+  observable filing-grid rows and 370 positives (train 9,463/168, test 3,521/202)
+  versus 1,671/37 today. The label definition (-30%, 30 trading days) and split
+  geometry A are deliberately unchanged, and the survivorship bias the wider universe
+  cannot escape (yfinance serves listed names only, SEC's current ticker map drops
+  delisted symbols, eleven union names therefore resolve to no CIK) is disclosed in
+  docs/11 rather than papered over.
+- `scripts/universe_options.py`: measures each "more positives" lever -- threshold, grid
+  density, window, universe -- against the cached tables and validates itself against the
+  shipped panel (1,776 rows / 39 positives, zero label disagreements). It fetches
+  candidate prices into a scratch directory and, with `--filing-grid`, enumerates the
+  union's real 10-K/10-Q dates from EDGAR metadata so the reported arithmetic is the
+  arithmetic the panel would have, at one request per filer and no document downloads.
 - `prompt_digest` / `run_fingerprint` in `shingan.eval.lora`: the eval checkpoint's
   fingerprint now covers a SHA-256 over the rendered prompts themselves, not only the
   row ids. Re-segmenting the corpus keeps every `TICKER-DATE` id while changing every
@@ -42,6 +58,16 @@ The dataset schema and the label definitions are versioned separately via the
   `source_ref` property the prompt renderer prints, and a regression test pins
   target refs through the audit's own normalisation path.
 ### Fixed
+- `scripts/fetch_real.py` could not have fetched a widened window: both filing fetches
+  passed a fixed `limit_per_ticker` (80 for documents, 120 for dates) and
+  `list_filings` returns the *newest* matches, so a 2004-2024 window would have
+  silently dropped the oldest filings -- precisely the GFC-years documents an extended
+  window is fetched for -- with no error anywhere. The limit is now derived from the
+  configured window, and the helper docstrings say why it is a truncation hazard rather
+  than a performance knob. The same file now resolves CIKs from SEC's own ticker map
+  (10,431 symbols, cached) with the bundled 24-name candidate table kept as the
+  fallback for when `www.sec.gov` refuses, which is what limits any universe wider than
+  that table today.
 - The prompt character budget translated max_seq_length with a prose density constant
   (3.6 chars/token); the real corpus measures 1.84-2.05, so "within budget" prompts
   were ~7,000 tokens against a 4,096 limit. The constant is now 1.9, measured; SFT

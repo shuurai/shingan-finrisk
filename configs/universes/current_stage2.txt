@@ -1,0 +1,37 @@
+# The Stage 2 universe exactly as declared in configs/data/stage2_real.yaml.
+# Used to measure the "extend the window back to the GFC" lever on the names that
+# are already paid for, before asking whether new names are worth their downloads.
+JPM
+GS
+GE
+CAT
+BA
+XOM
+T
+F
+M
+WBA
+BAC
+C
+WFC
+AIG
+CVX
+HAL
+OXY
+GM
+DIS
+VZ
+INTC
+CSCO
+TGT
+KSS
+DOW
+X
+MRO
+APA
+CVS
+AAL
+UAL
+DAL
+MMM
+IBM

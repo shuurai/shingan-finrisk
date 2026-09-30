@@ -1,0 +1,87 @@
+# =====================================================================================
+# Shingan — Stage 2 wide overlay (universe + window expansion)
+# =====================================================================================
+# Deep-merged onto `configs/default.yaml` and used *instead of*
+# `configs/data/stage2_real.yaml` when the corpus is rebuilt for the positives expansion.
+# Every number behind this file is measured in docs/11-universe-expansion.md by
+# `scripts/universe_options.py`; the summary is:
+#
+#   * The shipped configuration trains on 4 usable positives (A split, tail_risk) and a
+#     14B SFT run on that count produced a constant answer (docs/09 section 20). The
+#     binding constraint on every Track B result is therefore the positive count, not the
+#     pipeline.
+#   * Extending the window back to 2004-01-01 adds the GFC: on the shipped 34 names the
+#     pre-2010 years hold 43 positives on the filing grid versus 7 in the whole
+#     2010-2019 decade. This is the cheapest lever measured -- only the 2004-2009
+#     documents are new downloads.
+#   * Widening the universe to the 180 resolvable names across eleven sectors raises the
+#     filing grid to 12,984 observable rows / 370 positives at the shipped -30%
+#     threshold (train 9,463/168, test 3,521/202) -- and costs ~12,000 documents.
+#
+# Two disclosures travel with this configuration and are not optional reading:
+#
+#   Survivorship bias. The price source (yfinance) serves listed instruments only, and
+#   SEC's *current* ticker map drops delisted symbols as well, so eleven union names
+#   (AVB, BK, CMA, DO, EQR, GPS, HES, JWN, MRO, WBA, X) resolve to no CIK at all. The
+#   names that died are exactly the strongest positives a tail-risk model should learn,
+#   and they are absent by construction. The shipped 34-name universe already carries
+#   this bias, and it has a second face: MRO, WBA and X were declared in it and never
+#   reached prices, so the panel silently lost them (the "WBA 2023" positive the old
+#   config comment advertised was never in the data).
+#
+#   Label window overlap. The decision grid stays "one row per filing date" (quarterly
+#   spacing against a 30-trading-day horizon), deliberately *not* monthly: a monthly
+#   grid triple the rows at zero download cost but puts the 30-day windows of adjacent
+#   rows on top of each other and hands the model near-identical text from one filing.
+#   The grid rule is part of the measurement, not a convenience.
+# =====================================================================================
+
+data:
+  # 180 names: the shipped 34 plus the candidates whose positive yield was measured by
+  # scripts/universe_options.py, minus the eleven unresolvable symbols above.
+  # See configs/universes/wide_stage2.txt for the list and docs/11 for the yields.
+  universe: [
+      AA, AAL, AAPL, ABBV, AEP, AIG, ALK, ALL, AMD, AMGN,
+      AMZN, ANF, APA, APTV, AVGO, AXP, BA, BAC, BBY, BIIB,
+      BKNG, BKR, BMY, BWA, BXP, C, CAT, CCL, CHTR, CI,
+      CLF, CMCSA, CNC, COF, COST, CSCO, CSX, CVNA, CVS, CVX,
+      D, DAL, DD, DE, DELL, DG, DIS, DLTR, DOW, DUK,
+      DVN, EBAY, ED, EMR, EOG, ESS, ETN, EXC, EXPE, F,
+      FCX, FDX, FITB, FOXA, FTI, GD, GE, GILD, GM, GOOGL,
+      GS, HAL, HBAN, HCA, HD, HLT, HON, HPE, HPQ, HUM,
+      IBM, INTC, IRM, JBLU, JNJ, JPM, KEY, KMI, KSS, LEA,
+      LLY, LMT, LOW, LUV, LYB, LYFT, M, MAC, MAR, MET,
+      META, MMM, MOH, MPC, MRK, MRNA, MS, MSFT, MTB, MU,
+      MUR, NCLH, NEE, NEM, NFLX, NOC, NOV, NSC, NTRS, NUE,
+      NVDA, O, ORCL, OXY, PARA, PEG, PFE, PH, PINS, PLD,
+      PNC, PPG, PRU, PSX, PTON, PYPL, QCOM, RCL, RF, RIG,
+      ROST, RTX, S, SCHW, SHW, SLB, SLG, SNAP, SO, SPG,
+      SPOT, STT, STX, T, TGT, THC, TJX, TMUS, TRV, TXN,
+      UAL, UBER, UHS, UNH, UNP, UPS, USB, VLO, VNO, VZ,
+      W, WBD, WDC, WEC, WFC, WMB, WMT, XEL, XOM, ZION,
+    ]
+  start: 2004-01-01
+  end: 2024-12-31
+  sources: [prices_yfinance, edgar]
+  offline: false
+  sec_user_agent: "shingan-research/0.1 (contact: research@shingan.dev)"
+  cache_dir: data/raw/real
+
+labels:
+  # The shipped definition, unchanged on purpose: -30% peak-to-trough over 30 trading
+  # days. Loosening it to -25% would raise the train positives from 168 to 292 without
+  # a single download, but it redefines the label -- every measured number becomes
+  # incomparable and a shallower drawdown is a different event. It stays available as a
+  # documented sensitivity (docs/11 section 4), not as the default.
+  targets: [tail_risk]
+
+split:
+  # Geometry A, unchanged: per_label, purge 45 days, test from 2020-01-01. The test
+  # block keeps its comparability with the runs already recorded in docs/09, and the
+  # train block now spans 2004-2019, which is where the GFC positives land. The test
+  # block remains regime-concentrated (March 2020 dominates it) and must still be
+  # reported per year.
+  per_label: true
+  purge_days: 45
+  test:
+    start: 2020-01-01

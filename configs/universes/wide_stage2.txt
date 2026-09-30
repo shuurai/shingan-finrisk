@@ -1,0 +1,26 @@
+# Wide Stage 2 universe -- the shipped 34 plus the measured candidates.
+#
+# 180 names, union of configs/universes/current_stage2.txt and
+# configs/universes/candidates.txt, minus every symbol SEC"s current ticker map
+# cannot resolve to a CIK (11 names: AVB, BK, CMA, DO, EQR, GPS, HES, JWN, MRO, WBA, X).
+# Those are delisted or renamed entities: survivorship bias, disclosed in
+# docs/11-universe-expansion.md rather than papered over.
+
+AA AAL AAPL ABBV AEP AIG ALK ALL AMD AMGN
+AMZN ANF APA APTV AVGO AXP BA BAC BBY BIIB
+BKNG BKR BMY BWA BXP C CAT CCL CHTR CI
+CLF CMCSA CNC COF COST CSCO CSX CVNA CVS CVX
+D DAL DD DE DELL DG DIS DLTR DOW DUK
+DVN EBAY ED EMR EOG ESS ETN EXC EXPE F
+FCX FDX FITB FOXA FTI GD GE GILD GM GOOGL
+GS HAL HBAN HCA HD HLT HON HPE HPQ HUM
+IBM INTC IRM JBLU JNJ JPM KEY KMI KSS LEA
+LLY LMT LOW LUV LYB LYFT M MAC MAR MET
+META MMM MOH MPC MRK MRNA MS MSFT MTB MU
+MUR NCLH NEE NEM NFLX NOC NOV NSC NTRS NUE
+NVDA O ORCL OXY PARA PEG PFE PH PINS PLD
+PNC PPG PRU PSX PTON PYPL QCOM RCL RF RIG
+ROST RTX S SCHW SHW SLB SLG SNAP SO SPG
+SPOT STT STX T TGT THC TJX TMUS TRV TXN
+UAL UBER UHS UNH UNP UPS USB VLO VNO VZ
+W WBD WDC WEC WFC WMB WMT XEL XOM ZION

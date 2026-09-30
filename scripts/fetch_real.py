@@ -32,6 +32,7 @@ Notes on honesty, carried over from docs/02-data.md:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from datetime import date, timedelta
@@ -115,6 +116,11 @@ CONCEPT_TO_COLUMN: dict[str, str] = {
 
 NEWS_COLUMNS = ["ticker", "published", "source", "title", "body", "sentiment"]
 EVENTS_COLUMNS = ["ticker", "event_date", "event_kind", "severity", "source"]
+
+#: SEC's official ticker -> CIK map. Authoritative and universe-size independent;
+#: unreachable for this network when the Stage 2 corpus was built (www.sec.gov 403),
+#: which is why the bundled candidate table below exists as a fallback.
+COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 
 
 def load_overlay_config(overlay: Path) -> ProjectConfig:
@@ -225,15 +231,65 @@ EXTRA_CIK_CANDIDATES: dict[str, tuple[str, str]] = {
 }
 
 
-def resolve_cik_map(client: SecEdgarClient, tickers: list[str]) -> dict[str, str]:
+def load_sec_ticker_map(cache_path: Path, *, user_agent: str) -> dict[str, str] | None:
+    """SEC's own ticker -> CIK map, cached; ``None`` when it cannot be fetched.
+
+    ``www.sec.gov`` served 403 to this network when the Stage 2 corpus was first built,
+    which is why :data:`EXTRA_CIK_CANDIDATES` exists. The endpoint answers now, and the
+    map covers 10k+ symbols: without it every universe wider than the bundled table
+    would silently drop names. The cache keeps the fetch from repeating on every run.
+    """
+    import urllib.request
+
+    if not cache_path.is_file():
+        try:
+            request = urllib.request.Request(
+                COMPANY_TICKERS_URL,
+                headers={"User-Agent": user_agent, "Accept": "application/json"},
+            )
+            with urllib.request.urlopen(request, timeout=60) as response:
+                payload = response.read()
+        except Exception as exc:  # noqa: BLE001 - reported, fallback follows
+            print(f"  ! SEC ticker map unavailable ({exc}); falling back to bundled CIKs")
+            return None
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_bytes(payload)
+        print(f"  SEC ticker map cached to {cache_path} ({len(payload):,} bytes)")
+    try:
+        raw = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001 - a corrupt cache must not be fatal
+        print(f"  ! SEC ticker map cache is unreadable ({exc}); falling back to bundled CIKs")
+        return None
+    mapping: dict[str, str] = {}
+    for entry in raw.values():
+        mapping.setdefault(str(entry["ticker"]).upper(), f"{int(entry['cik_str']):010d}")
+    return mapping
+
+
+def resolve_cik_map(
+    client: SecEdgarClient,
+    tickers: list[str],
+    *,
+    map_cache: Path | None = None,
+) -> dict[str, str]:
     """Ticker → CIK for the universe, with every candidate verified against EDGAR.
 
-    The bundled ``CIK_BY_TICKER`` covers the ten-name Stage 2 basket. Wider universes
-    use :data:`EXTRA_CIK_CANDIDATES`. Verification accepts either the record's
-    ``tickers`` field or, when that field is absent (filers whose EDGAR record predates
-    it — United States Steel, Marathon Oil and Apache are all like this), a name match
-    against the expected filer name. Anything unverified is dropped with a message.
+    Two sources, in order. SEC's own ticker map is authoritative and covers any universe
+    size, so it is tried first (cached at ``map_cache``). When ``www.sec.gov`` refuses --
+    as it did when the Stage 2 corpus was built -- the bundled ``CIK_BY_TICKER`` plus
+    :data:`EXTRA_CIK_CANDIDATES` are used instead, and each is verified against the
+    filer's submissions record: either the record's ``tickers`` field lists the symbol,
+    or (for filers whose records predate that field) the record's ``name`` matches the
+    expected filer name. Anything unverified is dropped with a message.
     """
+    live = load_sec_ticker_map(map_cache, user_agent=client.user_agent) if map_cache else None
+    if live is not None:
+        known = {ticker: live[ticker] for ticker in tickers if ticker in live}
+        unknown = sorted(set(tickers) - set(known))
+        if unknown:
+            print(f"warning: SEC ticker map has no CIK for {', '.join(unknown)}")
+        return known
+
     known = {ticker: CIK_BY_TICKER[ticker] for ticker in tickers if ticker in CIK_BY_TICKER}
     unverified: list[str] = []
     for ticker in tickers:
@@ -339,10 +395,16 @@ def fetch_filings_text(
     doc_cache: Path,
     cik_by_ticker: dict[str, str] | None = None,
     forms: tuple[str, ...] = ("10-K", "10-Q"),
-    limit_per_ticker: int = 80,
+    limit_per_ticker: int = 400,
     max_chars: int = 80_000,
 ) -> pd.DataFrame:
-    """Download filing documents and cut them into Item sections."""
+    """Download filing documents and cut them into Item sections.
+
+    ``limit_per_ticker`` is a silent-truncation hazard, not a performance knob:
+    ``list_filings`` returns the *newest* matches, so a limit below the window's filing
+    count drops the oldest documents without any error. ``main`` derives it from the
+    configured window; the default is high enough for a 2004-2024 one.
+    """
     doc_cache.mkdir(parents=True, exist_ok=True)
     records: list[dict[str, object]] = []
     cik_by_ticker = cik_by_ticker or {}
@@ -408,7 +470,7 @@ def fetch_filings_metadata(
     since: date,
     cik_by_ticker: dict[str, str] | None = None,
     forms: tuple[str, ...] = ("10-K", "10-Q"),
-    limit_per_ticker: int = 120,
+    limit_per_ticker: int = 400,
 ) -> pd.DataFrame:
     """Filing dates and accessions only — no document text.
 
@@ -530,6 +592,14 @@ def main() -> None:
         action="store_true",
         help="After fetching, run build_panel and write data/processed.",
     )
+    parser.add_argument(
+        "--price-sleep-seconds",
+        type=float,
+        default=15.0,
+        help="Pause between per-ticker price requests. The 15s default was chosen after"
+            " this network was rate limited as a whole; a wide universe may lower it at"
+            " its own risk (the fetch reports which tickers came back empty).",
+    )
     args = parser.parse_args()
 
     config = load_overlay_config(args.data_config)
@@ -553,10 +623,16 @@ def main() -> None:
         else:
             print(f"prices: reusing cached {prices_path} ({len(prices)} rows)")
     else:
-        prices = fetch_prices(config, out_dir)
+        prices = fetch_prices(config, out_dir, sleep_seconds=args.price_sleep_seconds)
 
     client = build_client(config)
-    cik_by_ticker = resolve_cik_map(client, tickers)
+    cik_by_ticker = resolve_cik_map(client, tickers, map_cache=out_dir / "company_tickers.json")
+    # One 10-K plus about three 10-Qs per year; the floor of 120 keeps the shipped
+    # 2010-2024 window working and the window term keeps a *widened* window honest.
+    # A fixed limit is not a small inefficiency here: list_filings returns the newest
+    # ``limit`` matches, so too small a number silently drops the oldest filings --
+    # exactly the GFC-years documents an extended window is fetched for, with no error.
+    filing_limit = max(120, 5 * (int(str(config.data.end)[:4]) - int(str(config.data.start)[:4]) + 1))
     fundamentals = fetch_fundamentals(client, tickers, cik_by_ticker)
     print(f"fundamentals: {len(fundamentals)} rows, {fundamentals['ticker'].nunique()} tickers")
     # Persist immediately: each successful leg must survive a later leg failing
@@ -569,6 +645,7 @@ def main() -> None:
             tickers,
             since=date.fromisoformat(str(config.data.start)) - timedelta(days=180),
             cik_by_ticker=cik_by_ticker,
+            limit_per_ticker=filing_limit,
         )
         print(
             f"filings: {len(filings)} filing dates, text NOT fetched "
@@ -581,6 +658,7 @@ def main() -> None:
             since=date.fromisoformat(str(config.data.start)) - timedelta(days=180),
             doc_cache=out_dir / "docs",
             cik_by_ticker=cik_by_ticker,
+            limit_per_ticker=filing_limit,
         )
         print(f"filings: {len(filings)} sections, {filings['ticker'].nunique()} tickers")
 

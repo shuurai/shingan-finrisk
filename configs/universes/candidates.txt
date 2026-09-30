@@ -1,0 +1,184 @@
+# Candidate names for a wider Stage 2 universe.
+#
+# Selection rule: names that a tail-risk model must be able to rank, spread across the
+# two systemic crises this window contains (2008-2009, 2020) and the idiosyncratic
+# blowups among survivors (retail 2017-2020, energy 2014-2016, regional banks 2023,
+# travel 2020). Names are grouped by the stress they carry, not by fame: the point of
+# the list is to be *measured*, and the measurement in scripts/universe_options.py
+# decides which ones earn their filings downloads.
+#
+# Known limitation, measured and disclosed rather than assumed: the price source
+# (yfinance) serves listed instruments only. Delisted names are simply absent --
+# LEH, FNM, SIVB, FRC, BBBY, JCP, SHLD and CHK all return no rows -- and some
+# symbols have been *reused* (STI returns 2022+, SHLD returns 2023+, which are
+# different companies). Anything added here therefore carries survivorship bias and
+# is only accepted with that stated.
+#
+# --- banks and insurers: GFC (2008-2009) ---
+KEY
+RF
+HBAN
+FITB
+MTB
+USB
+PNC
+ZION
+CMA
+COF
+AXP
+BK
+STT
+NTRS
+SCHW
+MS
+PRU
+MET
+ALL
+TRV
+# --- industrials, materials, autos: GFC and the 2015-2016 commodity bust ---
+FCX
+NEM
+AA
+CLF
+NUE
+LYB
+PPG
+SHW
+DD
+LEA
+BWA
+APTV
+DE
+HON
+UNP
+CSX
+NSC
+FDX
+UPS
+LMT
+RTX
+GD
+NOC
+ETN
+EMR
+PH
+# --- energy: 2014-2016 bust, 2020 demand collapse ---
+VLO
+PSX
+MPC
+SLB
+EOG
+DVN
+HES
+MUR
+RIG
+DO
+BKR
+FTI
+NOV
+KMI
+WMB
+# --- airlines, travel, leisure: 2020 ---
+LUV
+JBLU
+ALK
+CCL
+RCL
+NCLH
+MAR
+HLT
+BKNG
+EXPE
+UBER
+LYFT
+# --- retail and consumer: 2017-2020 retail apocalypse ---
+JWN
+ANF
+GPS
+BBY
+DG
+DLTR
+WMT
+COST
+HD
+LOW
+ROST
+TJX
+W
+CVNA
+PTON
+M
+KSS
+# --- technology and communications: 2022 de-rating ---
+AAPL
+MSFT
+GOOGL
+AMZN
+META
+NVDA
+AMD
+MU
+QCOM
+TXN
+AVGO
+WDC
+STX
+SNAP
+PINS
+SPOT
+NFLX
+PYPL
+EBAY
+ORCL
+DELL
+HPQ
+HPE
+TMUS
+S
+CMCSA
+CHTR
+WBD
+PARA
+FOXA
+# --- health care: policy and pipeline shocks ---
+UNH
+CI
+HUM
+MOH
+CNC
+HCA
+THC
+UHS
+BIIB
+MRNA
+PFE
+MRK
+JNJ
+ABBV
+AMGN
+GILD
+BMY
+LLY
+# --- REITs: 2020 and the 2023 office/regional-bank stress ---
+SPG
+O
+VNO
+SLG
+BXP
+MAC
+IRM
+PLD
+EQR
+AVB
+ESS
+# --- utilities: the stable-negative control group ---
+DUK
+SO
+NEE
+AEP
+EXC
+XEL
+D
+ED
+PEG
+WEC
