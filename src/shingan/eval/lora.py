@@ -25,6 +25,7 @@ resulting scores as input.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -383,6 +384,35 @@ _REF_SEPARATOR = re.compile(r"[\s:]+")
 def _normalize_ref(ref: str) -> str:
     """Collapse separator runs so equivalent refs compare equal."""
     return " ".join(part for part in _REF_SEPARATOR.split(ref.strip()) if part)
+
+
+def prompt_digest(prompts: Mapping[Any, str]) -> str:
+    """Order-independent SHA-256 over the rendered prompts themselves.
+
+    Sample ids do not change when the corpus underneath them does — a re-segmented
+    filings table keeps every ``TICKER-DATE`` key while every prompt body changes —
+    so a checkpoint fingerprint built from ids alone cannot tell the two runs apart.
+    The digest covers the full text of every prompt, keyed deterministically.
+    """
+    digest = hashlib.sha256()
+    for key in sorted(prompts, key=repr):
+        digest.update(prompts[key].encode("utf-8"))
+        digest.update(b"\x00")
+    return digest.hexdigest()
+
+
+def run_fingerprint(payload: Mapping[str, Any]) -> str:
+    """The 16-hex checkpoint identity from a payload that must include ``prompt_digest``.
+
+    Everything that would make a stored generation stale belongs here: row identity,
+    the digest of the rendered prompts, the arm list, and every generation setting.
+    Two runs with different corpora produce different fingerprints and simply start
+    new checkpoint files rather than resuming mismatched rows.
+    """
+    if "prompt_digest" not in payload:
+        raise ValueError("run_fingerprint payload must include the rendered prompts' digest")
+    encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]
 
 
 def document_refs(context: PromptContext) -> set[str]:

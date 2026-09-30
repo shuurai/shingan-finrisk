@@ -1185,3 +1185,61 @@ corpus can be re-segmented"的预留路径，第一次真正被用上。另注�
   代码算的，代码改进不会自动回灌。`resegmented_at` 时间戳已随重写写入缓存记录。
 - **解析失败率是评测有效性的前置门**：82% 失败臂上的任何指标差异都是幸存者偏差。
   报告已在 paired comparison 里明示被丢弃行数，但读表的人要先看 parse 行再读差值。
+
+## 20. Step 15 — 干净语料上的最终裁判：恒定输出（run 20260929T220114Z）
+
+### 20.1 结果
+
+重训（lora-real2，干净语料）+ `--mode both` 重评：
+
+| path | AUC | KS（方向） | PR-AUC | n | 解析率 |
+| --- | --- | --- | --- | --- | --- |
+| structured_matched | 0.5506 | 0.1794（pos_higher） | 0.0595 | 616 | — |
+| text_baseline（TF-IDF） | **0.3920** | 0.2616（**negat**） | 0.0415 | 616 | — |
+| text_only_zero_shot | 0.5488 | 0.1858（pos_higher） | 0.0752 | 581 | 94.3% |
+| **text_only_lora** | **0.5000** | **0.0000（tied）** | 0.0552 | 548 | 89.0% |
+
+### 20.2 主判读：lora 臂退化为恒定输出，语义问题在当前数据下不可判
+
+直接核验产物：**548/548 行的 tail_risk 分数全部是 0.0**（severity 一律 low、
+catalysts 一律空数组）。AUC 0.5 / KS 0 是常数输出的定义性读数，不是弱信号。
+这就是 §17 起反复预警的结局在干净语料上的兑现：**train 779 例只有 4 个正样本，
+SFT 学到的是边缘分布（恒答 0），不是判别语义**。"文本语义有无增量"这个问题
+在当前数据下没有答案——瓶颈是正样本数，不是管线。继续在 4 个正样本上重训
+没有意义，下一大项只能是扩池 + events 源。
+
+### 20.3 引用审计抓到编造：格式正确、内容伪造
+
+lora 臂 706 条文档引用只有 4 条解析（zero-shot 臂 932/992）。逐条检查：refs
+的**格式**完全符合 taught shape（`10-Q:2021-11-05:Item 1A:0001193125-21-302927`），
+但 accession 数字是编造的——模型从 779 个样本学会了 ref 的形状，背不下真实的
+accession 号；解析成功的 4 条是数字碰撞。zero-shot 臂解析率高的原因正相反：
+基座模型直接从 prompt 的块头**复制** ref。审计门的设计目的（分辨"引用了 prompt
+里的文档"和"引用了形状像引用的字符串"）在这一轮得到最清晰的展示。
+
+### 20.4 旧叙事修订：text_baseline 的领先至少部分是 soup 伪影
+
+`text_baseline` 是对**同一份渲染 prompt** 做 TF-IDF（`models/text_baseline.py`）。
+重分段改变了每行的 filing 文本，基线数字随之重算：0.6731 → **0.3920，方向转负**。
+§17.2 的"0.67 领先是新闻量代理"结论是在污染语料上测的——XBRL 标签汤携带的
+spurious token-标签相关至少部分驱动了那个数字。干净语料上的新格局：
+**zero-shot 语义模型显著优于 TF-IDF**（AUC 差 +0.1583，CI 不跨零），但
+zero-shot 对 structured_matched 仍无显著增量（CI 跨零）。
+
+### 20.5 连带修复：checkpoint 指纹不含 prompt 内容（真 bug）
+
+本轮与上一轮（污染语料）的 checkpoint 文件名**一模一样**
+（`34f2b3805b387132.jsonl`）。排查：指纹 payload 只哈希了 `row_ids`
+（`TICKER-YYYYMMDD`），而重分段恰恰保留全部 row id、只改 prompt 正文——
+注释承诺的"order and content"里 content 一半没有实现。本轮未出事纯属侥幸：
+上一 run 正常结束删除了 checkpoint；若它中途断过，本轮会把污染语料的旧生成
+静默续用为新语料评分。修复：`prompt_digest`（渲染 prompt 全文的 SHA-256，
+序无关）纳入指纹 payload，抽成纯函数（`eval/lora.py`），payload 缺 digest 直接
+拒绝，3 个回归测试钉住。
+
+### 20.6 收束
+
+Track B 文本轨在当前数据上的三份答卷：zero-shot 0.55（对词袋显著、对结构化
+无增量）、TF-IDF 0.39（soup 伪影戳破后的真实水平）、LoRA 常数（4 正样本的
+必然后果）。全部结论的共同前提是 32 个 test 正样本、4 个 train 正样本——
+扩池之前，任何进一步的训练或评测都不改变格局。

@@ -1081,6 +1081,8 @@ def eval_lora(
         compare_prompts,
         difference_plan,
         paired_differences,
+        prompt_digest,
+        run_fingerprint,
         score_from_attempts,
         write_artifact,
     )
@@ -1274,28 +1276,32 @@ def eval_lora(
     # A checkpoint keyed by everything that would make a stored generation stale:
     # row identity (order and content of the prompt set), the arm list, and every
     # generation setting. A different run produces a different fingerprint and
-    # simply starts a new file rather than resuming mismatched rows.
-    run_fingerprint = hashlib.sha256(
-        json.dumps(
-            {
-                "label": label,
-                "split": split,
-                "mode": mode,
-                "arms": arms,
-                "n_rows": len(conversations),
-                "row_ids": sorted(sample_ids.iloc[pos] for pos in contexts),
-                "budget": budget,
-                "max_new_tokens": max_new_tokens,
-                "thinking": thinking,
-                "temperature": temperature,
-                "quantization": identity.quantization,
-                "base_model": identity.base_model,
-                "tokenizer_source": identity.tokenizer_source,
-            },
-            sort_keys=True,
-        ).encode("utf-8")
-    ).hexdigest()[:16]
-    checkpoint_path = Path("artifacts") / "lora-eval" / "_checkpoint" / f"{run_fingerprint}.jsonl"
+    # simply starts a new file rather than resuming mismatched rows. The content
+    # half is `prompt_digest`: sample ids alone do not change when the corpus
+    # underneath them does (a re-segmented filings table keeps every TICKER-DATE
+    # key), and two runs that hashed only ids shared one fingerprint -- a stale
+    # checkpoint from the old corpus would have been served as scores for the new.
+    run_fingerprint_ = run_fingerprint(
+        {
+            "label": label,
+            "split": split,
+            "mode": mode,
+            "arms": arms,
+            "n_rows": len(conversations),
+            "row_ids": sorted(sample_ids.iloc[pos] for pos in contexts),
+            "prompt_digest": prompt_digest(prompts_by_row),
+            "budget": budget,
+            "max_new_tokens": max_new_tokens,
+            "thinking": thinking,
+            "temperature": temperature,
+            "quantization": identity.quantization,
+            "base_model": identity.base_model,
+            "tokenizer_source": identity.tokenizer_source,
+        }
+    )
+    checkpoint_path = (
+        Path("artifacts") / "lora-eval" / "_checkpoint" / f"{run_fingerprint_}.jsonl"
+    )
     checkpoint = GenerationCheckpoint(checkpoint_path)
     outputs_by_arm: dict[str, list[str]] = {}
     attempts_by_arm: dict[str, list[Any]] = {}

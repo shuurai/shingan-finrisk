@@ -12,6 +12,12 @@ The dataset schema and the label definitions are versioned separately via the
 ## [Unreleased]
 
 ### Added
+- `prompt_digest` / `run_fingerprint` in `shingan.eval.lora`: the eval checkpoint's
+  fingerprint now covers a SHA-256 over the rendered prompts themselves, not only the
+  row ids. Re-segmenting the corpus keeps every `TICKER-DATE` id while changing every
+  prompt body, and the two runs' fingerprints collided -- had the earlier run been
+  interrupted instead of completing, its checkpoint would have been served as scores
+  for the new corpus. A payload without the digest is rejected.
 - `scripts/fetch_sec_docs.py --resegment` re-runs the *current* segmenter over every
   cached document's full text before rebuilding `filings.parquet`. The cache stores the
   segmentation computed at fetch time, so a segmenter improvement never reached the

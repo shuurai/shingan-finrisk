@@ -42,7 +42,9 @@ from shingan.eval.lora import (
     build_payload,
     difference_plan,
     paired_differences,
+    prompt_digest,
     render_markdown,
+    run_fingerprint,
     score_from_attempts,
 )
 from shingan.models.lora_inference import (
@@ -457,3 +459,27 @@ def test_checkpoint_completed_reads_an_existing_file(tmp_path):
     line = '{"key": "a", "i": 2, "text": "x"}'
     path.write_text(line + "\n", encoding="utf-8")
     assert GenerationCheckpoint(path).completed("a") == {2: "x"}
+
+
+def test_the_run_fingerprint_covers_prompt_content_not_just_row_ids() -> None:
+    """Re-segmenting the corpus keeps every TICKER-DATE id and changes every body.
+
+    Two runs whose fingerprints collided would resume a stale checkpoint -- old
+    corpus generations served as new corpus scores. The digest of the rendered
+    prompts is what separates them, so it must be part of the payload.
+    """
+    base = {"label": "tail_risk", "split": "test", "prompt_digest": "a" * 64}
+    assert run_fingerprint(base) != run_fingerprint(dict(base, prompt_digest="b" * 64))
+
+
+def test_prompt_digest_tracks_the_bodies_and_ignores_the_order() -> None:
+    prompts = {"AAL-20200219": "prompt one", "TSLA-20200430": "prompt two"}
+    changed = dict(prompts, **{"AAL-20200219": "prompt ONE"})
+    assert prompt_digest(prompts) != prompt_digest(changed)
+    assert prompt_digest(prompts) == prompt_digest(dict(reversed(list(prompts.items()))))
+
+
+def test_a_fingerprint_payload_without_the_prompt_digest_is_rejected() -> None:
+    """A silent fall-back to id-only identity is the bug this guards against."""
+    with pytest.raises(ValueError):
+        run_fingerprint({"label": "tail_risk"})
