@@ -38,6 +38,7 @@ def frame_with(rows: list[tuple[str, int, int]]) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "ticker": ["AAPL"] * len(rows),
+            "as_of": ["2020-03-01"] * len(rows),
             "split": [row[0] for row in rows],
             "label_tail_risk": [row[1] for row in rows],
             "label_mask_tail_risk": [row[2] for row in rows],
@@ -50,7 +51,7 @@ def test_rows_that_are_not_observable_cannot_count_toward_acceptance(report) -> 
     frame = frame_with([("train", 0, 1), ("train", 1, 0), ("test", 1, 0)])
     verdicts = {verdict.name: verdict for verdict in report.acceptance_verdicts(frame)}
     assert verdicts["observable rows"].value == 1
-    assert verdicts["positives (all)"].value == 0
+    assert verdicts["positives (usable)"].value == 0
     assert verdicts["test positives"].value == 0
 
 
@@ -70,7 +71,37 @@ def test_meeting_the_target_reports_a_pass(report) -> None:
     assert verdicts["observable rows"].passed is True
     assert verdicts["train positives"].passed is True
     assert verdicts["test positives"].passed is True, "150 exactly is the stated bar"
-    assert verdicts["positives (all)"].passed is False, "210 < 300 still fails the total"
+    assert verdicts["positives (usable)"].passed is False, "210 < 300 still fails the total"
+
+
+def test_a_positive_in_an_excluded_block_cannot_satisfy_the_total(report) -> None:
+    """The first wide rebuild "passed" on 370 positives while 128 sat in `excluded`.
+
+    Counting every observable positive makes the total reachable without a single row the
+    model can use, which is the failure mode of a window widening specifically.
+    """
+    frame = frame_with(
+        [("train", 1, 1)] * 60 + [("test", 1, 1)] * 150 + [("excluded", 1, 1)] * 400 + [("train", 0, 1)] * 10_000
+    )
+    verdicts = {verdict.name: verdict for verdict in report.acceptance_verdicts(frame)}
+    assert verdicts["observable rows"].passed is True
+    assert verdicts["positives (usable)"].value == 210
+    assert verdicts["positives (usable)"].passed is False, "400 unreachable positives must not lift the total over 300"
+
+
+def test_idle_positives_names_the_blocks_no_model_reads(report) -> None:
+    frame = pd.DataFrame(
+        {
+            "ticker": ["AAPL"] * 5,
+            "as_of": ["2008-10-01", "2009-03-01", "2020-03-01", "2020-04-01", "2020-05-01"],
+            "split": ["excluded", "excluded", "train", "test", "test"],
+            "label_tail_risk": [1, 1, 0, 1, 1],
+            "label_mask_tail_risk": [1, 1, 1, 1, 1],
+        }
+    )
+    idle, total, years = report.idle_positives(frame)
+    assert (idle, total) == (2, 4)
+    assert years == [2008, 2009], "the years say which regime was fetched and then discarded"
 
 
 def test_an_unmeasurable_value_is_not_a_failure(report) -> None:
