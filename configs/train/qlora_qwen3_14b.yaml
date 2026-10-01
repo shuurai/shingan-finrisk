@@ -85,7 +85,17 @@ lora:
   # here instead would silently stop matching the moment the batch size or the epoch
   # count changes.
   warmup_ratio: 0.03
-  num_train_epochs: 3
+  # 1, not 3 (changed 2026-10-01, docs/09 section 22.2). The 3 was chosen when the train
+  # fold held 566 rows, where one epoch was 35 optimisation steps — too few to read a
+  # curve off. On the wide corpus the train fold is 7,307 rows, so **one epoch is 457
+  # steps and 7,307 sample exposures, against 1,698 exposures for the entire 566-row
+  # run**: still 4.3x the training that produced the last adapter, from a third of the
+  # wall clock (measured baseline: 108 steps / 2,538 s in `artifacts/lora/run.json`).
+  # Epochs two and three are three times the cost for two more points on the same curve,
+  # and checkpoints are resumable, so the cheap direction is to look at the validation
+  # curve first and continue only if it is still improving. Raising this back to 3 is a
+  # deliberate decision, not a default.
+  num_train_epochs: 1
   per_device_train_batch_size: 1
   per_device_eval_batch_size: 1
   gradient_accumulation_steps: 16

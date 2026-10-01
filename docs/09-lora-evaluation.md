@@ -1412,7 +1412,8 @@ python scripts/audit_prompt_tokens.py --sft-dir data/processed/sft_stage2_wide \
    3 epochs 在 566 行上只有 1,698 次——**仍是 4.3 倍**。所以正确的默认是**先跑 1 epoch**（约
    5.5–7.4 h），拿到验证曲线后再决定要不要续训：checkpoint 可续，而 3 epochs 是 3 倍代价买同一条
    曲线上的后两个点。这个先后顺序与项目一贯的「先量再花」一致。
-4. 训练本身仍是 GPU 承诺，等用户放行（见 §23 的打分侧已就绪）。
+4. 训练本身仍是 GPU 承诺，等用户放行（见 §23 的打分侧已就绪）。**2026-10-01 放行，选 1 epoch，
+   启动实测与一处对上面这张表的精度修正见 §24。**
 
 ### 22.3 这一步没有验证什么
 
@@ -1540,3 +1541,69 @@ dry run: prompts built and verified, no model loaded. length min/median/max =
    若要修，正确形态是先让报告记录自己的预算来源，再谈参数。
 2. `PROMPT_OVERHEAD_CHARS` 仍未计入 assistant 回答轮（§21.6），随预算线性放大。
 3. 真正不带 `<STRUCTURED_SIGNALS>` 信号块的重训仍未做（docs/09 第 7 节）。
+
+## 24. Step 17 — 重训已启动：1 epoch / 457 步（2026-10-01）
+
+§22.2 把「1 epoch 还是 3」列成待决定项。**决定是 1 epoch**，理由就是那一节的算术：宽池训练集
+7,307 行，1 epoch = 457 个优化步 = **7,307 次样本曝光**，而上一次 3 epochs 在 566 行上只有 1,698 次
+—— 仍是 **4.3 倍**。2、3 epochs 是 3 倍代价买同一条曲线上的后两个点，而 checkpoint 可续。
+
+### 24.1 决定落在配置里，不是命令行上
+
+改 `configs/train/qlora_qwen3_14b.yaml`：`num_train_epochs: 3 → 1`，并在同处写下这段算术。没有新开
+`--epochs` 参数：覆写文件就是「意图」的记录处，多开一个入口会让两边都能改同一件事，而 §21 的教训
+正是**配置与训练器参数之间必须有一个可校验的纯函数**，不是一个更宽的接口。
+
+**这次改动不影响语料。** `chars_budget_for_seq_length` 只读 `max_seq_length`，所以 manifest 里的
+`character_budget 13,764` 与本次运行仍然一致 —— `CorpusScope` 比的就是这个数（§23.2），epoch 数
+不进入 prompt 渲染。启动前用项目自己的纯函数预演过：
+
+```
+num_train_epochs 1 | max_seq_length 8192
+warmup_steps 14 of 457 steps
+```
+
+`warmup_ratio: 0.03` 在边界处按这一轮的**真实**步数折算成 **14** 步（§21.4 的换算路径）；`run.json`
+会把它记进 `trainer_arguments` —— 只看配置快照是看不出这个键被翻译过的。
+
+### 24.2 启动与实测
+
+```bash
+python -m shingan train lora --train-config configs/train/qlora_qwen3_14b.yaml \
+    --train-file data/processed/sft_stage2_wide/train.jsonl \
+    --eval-file data/processed/sft_stage2_wide/valid.jsonl \
+    --output-dir artifacts/lora-wide-v1
+```
+
+| 事实 | 值 | 怎么知道的 |
+| --- | --- | --- |
+| 总优化步 | **457** | tqdm 报 `0/457`，与 `ceil(7307/16)` 逐字吻合 |
+| 样本丢弃 | **0** | 若被「Dropping fully masked examples」丢掉，步数会**少于** 457 |
+| VRAM | 31,974 / 32,607 MiB（**98.1%**） | `nvidia-smi`，util 100% |
+| 训练栈 | torch 2.11.0+cu128 / transformers 5.17.0 / trl 1.13.0 | 与 `pyproject` 的上界一致 |
+| warmup | **14** 步 | 纯函数，见 §24.1 |
+
+**输出写到新目录 `artifacts/lora-wide-v1/`**：`artifacts/lora/`（合成语料，带 SUPERSEDED 说明）与
+`lora-contract-v2/`（契约修复后）都不覆盖。它们各自记录了一件已经发生过的事（§13、§18），覆盖等于
+把那件事的代价一起删掉。
+
+### 24.3 一处对 §22.2 基线精度的修正
+
+§22.2 的 23.5 s/步取自 `artifacts/lora/run.json`。另一个**同配置**的运行
+`artifacts/lora-contract-v2/run.json` 是 2,888.4 s / 108 步 = **26.7 s/步**，比它慢 **13.7%**。
+两次的 `n_train_examples`(566) / `n_eval_examples`(216) / `max_seq_length`(4096) /
+`num_train_epochs`(3) **逐项相同**，所以这 13.7% 是机器自身的**跑间方差**，不是配置差异。
+
+含义：§22.2 那张表的两位有效数字超过了它承载得起的精度。按慢的那次基线，1 epoch 是
+**5.8–7.8 h 训练 + 0.4 h 验证 ≈ 6–8 h**，而不是表里的 5.5–7.4 h。**以本次运行自己的
+`train_runtime` 为准**，跑完即替换 —— 又一次「投影的价值是不让猜测沦为默认，测量的价值是让投影
+作废」，只不过这次作废的是我自己刚写下的那个投影。
+
+### 24.4 这一步没有验证什么
+
+- **训练还没结束**：loss 曲线、验证曲线、有没有过拟合，都还不知道。
+- **`eval lora` 打分未跑。** 宽池上依然没有给任何适配器打过分，F1（文本轨有无增量）**仍然没有
+  答案** —— 但它第一次成了可以在几个小时内拿到的答案，而不是等下一次扩池。
+- **验证阶段是这次运行里唯一没预演过的一段**：98.1% 的显存占用说明了为什么值得点名。训练步的显存
+  需求由 §24.2 证明够用；epoch 末 1,833 行的 forward-only 理论需求更低（无梯度、无 checkpointing
+  的激活保存），但**没有实测过**，所以它仍是这次运行里最可能失败的一步。
