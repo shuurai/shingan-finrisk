@@ -60,19 +60,28 @@ def test_the_budget_is_a_function_of_max_seq_length_and_grows_with_it() -> None:
 
 
 def test_the_training_overlay_changes_the_budget() -> None:
-    """Not a tautology: it pins that the two files disagree, which is why forwarding the
-    overlay matters. If they agreed, the missing flag would have been harmless."""
+    """The overlay is the *only* place the wider budget exists, which is why forwarding
+    the file is load-bearing rather than tidy.
+
+    When this test was written the two files agreed at 4096, and it asserted the
+    agreement so that the day they stopped agreeing would be noticed. That day is
+    2026-09-30. The assertion is inverted rather than deleted: if someone sets the
+    overlay back to the base value, this fails and says the flag is currently harmless —
+    a reader then updates it deliberately instead of trusting a green run to mean the
+    wiring is still doing something.
+    """
     base = load_config(ROOT / "configs" / "default.yaml", root=ROOT)
     if not TRAIN_OVERLAY.is_file():
         pytest.skip("training overlay not present")
     merged = load_config(ROOT / "configs" / "default.yaml", [TRAIN_OVERLAY], root=ROOT)
-    assert merged.lora.max_seq_length == base.lora.max_seq_length, (
-        "both files currently agree at 4096; this test exists to notice when they stop "
-        "agreeing, at which point the missing flag becomes a real defect again"
+    assert merged.lora.max_seq_length != base.lora.max_seq_length, (
+        f"the overlay and the base config agree again at "
+        f"{base.lora.max_seq_length}; `--train-config` remains correct but is no longer "
+        "load-bearing anywhere. Update this test deliberately."
     )
-    assert chars_budget_for_seq_length(merged.lora.max_seq_length) == chars_budget_for_seq_length(
+    assert chars_budget_for_seq_length(merged.lora.max_seq_length) > chars_budget_for_seq_length(
         base.lora.max_seq_length
-    )
+    ), "the divergence must be in the direction that admits more source text"
 
 
 def test_a_raised_limit_would_reach_the_corpus_through_the_overlay(tmp_path) -> None:

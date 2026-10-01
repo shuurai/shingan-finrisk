@@ -990,9 +990,20 @@ def eval_lora(
     config: ConfigOpt = None,
     data_config: DataConfigOpt = None,
     eval_config: EvalConfigOpt = None,
+    train_config: TrainConfigOpt = None,
     root: RootOpt = None,
     label: Annotated[str, typer.Option("--label", help="Label to score.")] = "tail_risk",
     split: Annotated[str, typer.Option("--split", help="test, valid or train.")] = "test",
+    sft_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--sft-dir",
+            help="SFT corpus the prompt-integrity check compares against. Defaults to "
+            "data/processed/sft. It must be the corpus the adapter was trained on: the "
+            "check rebuilds each prompt and compares it byte for byte with this file, so "
+            "pointing it at another corpus turns a working run into a reported mismatch.",
+        ),
+    ] = None,
     limit: Annotated[
         int | None, typer.Option("--limit", help="Score only the first N rows (a smoke run).")
     ] = None,
@@ -1053,10 +1064,6 @@ def eval_lora(
       file, which is a check that costs seconds and cannot run after the fact. The
       alternative failure — scoring a model on inputs it never saw — is invisible in
       every metric: it looks like a weak model.
-    * **Unparsed generations are disclosed, not filled in.** A row whose output has no
-      score is dropped, and the drop count and the number of dropped **positives** are
-      written per arm next to the metrics. Filling a zero would assert the model called
-      it negative.
     * **The row says what it is.** The prompt includes a twelve-column structured-signal
       block, so ``text_only_lora`` is prompt-conditioned, not text-only, and is compared
       against a matched baseline rather than against the full feature set.
@@ -1064,13 +1071,27 @@ def eval_lora(
       generated first from the same in-memory weights, with the same tokenizer and the
       same prompt set, and the adapter is attached afterwards. Two commands writing two
       artifacts would produce two numbers whose difference is not a measurement.
+    * **Unparsed generations are disclosed, not filled in.** A row whose output has no
+      score is dropped, and the drop count and the number of dropped **positives** are
+      written per arm next to the metrics. Filling a zero would assert the model called
+      it negative.
+
+    A fifth is enforced but is not a property of the output — it is a precondition, and it
+    is checked before anything expensive happens. ``--sft-dir`` names the corpus and its
+    ``manifest.json`` carries the character budget it was built at; a run whose own budget
+    differs is refused with both numbers and the file that set the corpus's. The usual
+    cause is ``--train-config`` left off, since ``lora.max_seq_length`` — which *is* the
+    budget, through ``chars_budget_for_seqlength`` — lives in that overlay. Without the
+    check the run renders every prompt, reports mismatched rows on whichever ones admitted
+    the extra text, and suggests rebuilding the corpus: the symptom named, the cause
+    missed, and the repair suggested the wrong one.
     """
     _configure_logging(verbose)
     project, paths = _load_stack(
         config=config,
         data_config=data_config,
         eval_config=eval_config,
-        train_config=None,
+        train_config=train_config,
         root=root,
     )
 
@@ -1085,6 +1106,7 @@ def eval_lora(
         build_payload,
         citation_summary,
         compare_prompts,
+        corpus_scope,
         difference_plan,
         paired_differences,
         prompt_digest,
@@ -1154,6 +1176,38 @@ def eval_lora(
     except ValueError as exc:
         _fail(str(exc))
 
+    budget = chars_budget_for_seqlength(project)
+    # Before the panel is built, not merely before the prompts are rendered. This needs
+    # the config and the corpus's manifest and nothing else, and the panel here takes
+    # minutes and a gigabyte of filings — a run configured to disagree with its own
+    # corpus should be refused in the second it takes to read two JSON files. Placed
+    # after `build_panel` it would still be "before anything expensive" in the sense of
+    # before generation, which is not the sentence the docstring claims.
+    corpus_dir = Path(sft_dir) if sft_dir is not None else paths.processed / "sft"
+    scope = corpus_scope(
+        corpus_dir,
+        run_budget=budget,
+        run_seq_length=int(project.lora.max_seq_length),
+    )
+    if scope.agrees is False:
+        _fail(
+            f"the SFT corpus was built at a different prompt budget: {scope.describe()}",
+            hint=(
+                "This run would render shorter prompts than the corpus holds, so the "
+                "prompt comparison could only report a mismatch. The budget is "
+                "`lora.max_seq_length` through `chars_budget_for_seqlength`, and it "
+                "lives in a training overlay"
+                + (
+                    f" — this corpus was built with `--train-config {scope.corpus_train_config}`"
+                    if scope.corpus_train_config
+                    else ""
+                )
+                + ". Pass that file to this command as `--train-config`, or pass "
+                "`--sft-dir` naming the corpus this run's config actually built."
+            ),
+        )
+    console.print(scope.describe())
+
     build = build_panel(project, write=False)
     panel = build.panel
     frames = label_split_frames(panel, label)
@@ -1164,7 +1218,6 @@ def eval_lora(
             hint="Check the label and the split definition in configs/default.yaml.",
         )
 
-    budget = chars_budget_for_seqlength(project)
     contexts = build_prompt_contexts(panel, build, project, label, budget)
 
     # Sample ids are formed the same way the builder forms them, so the rebuilt prompts
@@ -1181,15 +1234,17 @@ def eval_lora(
     if verify_prompts:
         records: list[dict[str, Any]] = []
         for name in ("train", "valid"):
-            candidate = paths.processed / "sft" / f"{name}.jsonl"
+            candidate = corpus_dir / f"{name}.jsonl"
             if candidate.is_file():
                 records.extend(iter_jsonl(candidate))
         if not records:
             if uses_adapter:
                 _fail(
-                    "there is no SFT file to check the prompts against",
-                    hint="Run `shingan data sft` first, or pass --no-verify-prompts to score "
-                    "without the check (the resulting numbers would not be reproducible).",
+                    f"there is no SFT file to check the prompts against: nothing readable "
+                    f"under {corpus_dir}",
+                    hint="Run `shingan data sft` first, or pass --sft-dir naming the corpus "
+                    "the adapter was trained on. --no-verify-prompts scores without the "
+                    "check, and the resulting numbers would not be reproducible.",
                 )
             console.print(
                 "[yellow]no SFT file to compare against, so the prompt check is reported "
@@ -1210,8 +1265,12 @@ def eval_lora(
                     f"the rebuilt prompts do not reproduce the SFT file: {detail}",
                     hint=(
                         "Scoring would measure the model on inputs it was not trained on. "
-                        "Rebuild the SFT file (`shingan data sft`) with the same --data-config, "
-                        f"or inspect the mismatch: {json.dumps(integrity.examples[:2], default=str)}"
+                        "The check compares against "
+                        f"{corpus_dir}; if that is not the corpus the adapter was trained "
+                        "on, pass --sft-dir naming it. If it is, rebuild the SFT file "
+                        "(`shingan data sft`) with the same --data-config and "
+                        "--train-config this run used, or inspect the mismatch: "
+                        f"{json.dumps(integrity.examples[:2], default=str)}"
                     ),
                 )
 
@@ -1521,6 +1580,11 @@ def eval_lora(
             "includes_structured_signals": True,
             "structured_signals": list(PROMPT_SIGNAL_COLUMNS),
             "chars_budget": budget,
+            # Which corpus the budget was checked against, and what its own manifest said.
+            # `chars_budget` alone cannot distinguish a run that verified its corpus from
+            # one whose corpus carried no manifest to verify — the two are the same number
+            # and different amounts of standing.
+            "corpus": scope.as_dict(),
             "n_truncated": int(sum(int(context.truncated) for context in contexts.values())),
         },
         data=data_info,

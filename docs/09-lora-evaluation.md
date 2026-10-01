@@ -1402,3 +1402,93 @@ python scripts/audit_prompt_tokens.py --sft-dir data/processed/sft_stage2_wide \
 - 没有验证"更多原文 → 更好的文本轨"。原文量翻倍是投入，产出要看重训后的 LoRA 评测——而
   `eval run` 目前没有 `text_only_lora` 臂（§20 记过），**训练完也先答不了"文本轨有无增量"**，
   除非先把 LoRA 打分路径接进评测。这个先后关系应当决定训练前还是训练后修评测。
+
+## 23. Step 16 — 打分臂先接上：`eval lora` 读不到它要打分的语料（2026-09-30）
+
+§22.3 把「先训后修评测 / 先修评测再训」列为需要决定的先后关系。决定是**先修**。修的过程里发现
+那条关系的措辞是错的：缺的不是「LoRA 打分臂」——`eval lora` 早已存在，并且已在真实窄池上跑过
+（`artifacts/lora-eval/20260929T220114Z/`，616 test 行、两臂、与 `structured_matched` 的配对区间
+都在）。真正的缺口是**它读不到宽池的语料**。
+
+### 23.1 两个缺口，同源
+
+`lora.max_seq_length` 住在训练覆写里，而它经 `chars_budget_for_seqlength` 决定 prompt 的字符
+预算。`data sft` 的对应缺陷已在 §21.1 修掉。评测侧有同一处，但**没有**接到同一个修法上：
+
+| | 现状 | 后果 |
+| --- | --- | --- |
+| 参数 | `eval lora` 传 `train_config=None` | 预算按 base config 算 = **5,982**，宽池语料是 **13,764** |
+| 语料路径 | 硬编码 `paths.processed / "sft"` | 指不到 `data/processed/sft_stage2_wide` |
+
+两者叠加的失败模式很坏：它会**先渲染完整个面板的 prompt**，再在完整性校验上逐行报不匹配，然后
+给出提示「重建语料」——而语料是对的，错的是这个命令读不到设置预算的那份文件。**症状被点名，原因在
+上游一步，给出的修法指向错误方向。**
+
+### 23.2 修法：manifest 交叉校验，且在任何昂贵的事之前
+
+新增 `--train-config` 与 `--sft-dir`；更要紧的是新增 `CorpusScope`（`eval/lora.py`，纯函数、
+不 import torch）：读语料自己的 `manifest.json`，把它的 `character_budget` 与本次运行的预算比对，
+不一致就**拒绝**，并在报错里同时给出两个数字与**设下语料预算的那个文件**。
+
+关键是位置。最初的实现放在 `build_panel` 之后、渲染之前——那已经比原来早得多，但仍然是「先建完
+14,669 行的面板再说不」。现在它紧跟在 `chars_budget_for_seqlength` 之后、`build_panel` **之前**：
+它只需要配置和两个 JSON，没有任何理由等面板。
+
+```
+$ python -m shingan eval lora --dry-run --data-config configs/data/stage2_wide.yaml \
+      --sft-dir data/processed/sft_stage2_wide
+error: the SFT corpus was built at a different prompt budget: corpus scope:
+character budget 13,764 (from configs\train\qlora_qwen3_14b.yaml) **disagrees**
+with this run's 5,982 (max_seq_length 8192 vs 4096)
+...  this corpus was built with `--train-config configs\train\qlora_qwen3_14b.yaml`.
+     Pass that file to this command as `--train-config`, ...
+real 0m1.051s
+```
+
+**1.05 秒**，而且给出的修法是对的。
+
+### 23.3 三值语义：未测 ≠ 通过
+
+`CorpusScope.agrees` 返回 `True` / `False` / **`None`**。没有 manifest、manifest 里没有
+`character_budget`、JSON 读不动——都是**未测**，不是「一致」。这一条不是为了好看：那时逐字节的
+prompt 比对就是**唯一**还站着的门，而它必须被说成唯一，不能被说成「manifest 也确认过了」。
+payload 里因此同时记 `chars_budget` 与 `corpus`：单看 `chars_budget` 无法区分「校验过语料的运行」
+和「语料没有 manifest 可校验的运行」——同一个数字，两种底气。
+
+### 23.4 顺带发现：同一行名字在两份 artifact 里可能不是同一次测量
+
+`eval lora` 会**重新拟合**基线行。它用的是本次运行的预算，所以一份 artifact 内部是自洽的；但
+`eval run` 不带 `--train-config` 时按 5,982 拟合同样的行名。于是 `text_baseline` 与 `fused`
+在两份 artifact 之间**不是同一个测量**。
+
+修法不是消除它（两条命令的默认意图本来就不同），而是**说出来**：当语料记录了覆写时，payload 增加
+一条 caveat，点名哪些行受影响、哪些不受。`structured` 与 `structured_matched` 不读 prompt 文本，
+**不受影响**——这一点必须写在 caveat 里，否则那条 caveat 会被读成「连 headline 减法都可疑」。
+
+`eval run` 目前没有 `--train-config`。这是**已知的开口**，不是遗漏：给它加上会让报告的含义随一个
+它不记录的参数而变，那是另一种 provenance 缺陷；今天先靠 caveat 披露（见 23.6）。
+
+### 23.5 验证了什么、没验证什么
+
+验证：
+- `CorpusScope` 12 项测试（`tests/test_corpus_scope.py`）：一致 / 不一致 / 三种未测 / `null` 不
+  变成字符串 `None` / payload 两侧都记 / caveat 只在语料记了覆写时出现。
+- 负例实测：不带 `--train-config` 在 **1.05 秒**内以正确措辞拒绝（上引）。
+- 全量 431 项测试通过，ruff 干净。
+
+没验证：
+- **没有加载 14B，也没有跑任何打分。** 宽池的 `--dry-run`（重建全部 prompt 并逐字节比对，约需
+  数十分钟）证明的只是 prompt 可重建，不是适配器会产出可解析输出——后者要等 §22.2 的重训。
+- 测试里那条 `test_the_training_overlay_changes_the_budget` 这轮**失败过一次**：它写的时候两个
+  文件都在 4096，作用是「等它们不再一致时被注意到」。§22 抬高覆写之后它就该失败。断言被**反转**
+  而不是删掉：若哪天覆写被改回 base 值，它会说「`--train-config` 仍然正确但已不再承重」。
+- 一个自己写出来的展示缺陷被测试抓到：manifest 有预算但没记 `max_seq_length` 时，`describe()`
+  印出字面 `None`（"max_seq_length None vs 8192"）——一句话里两个数字，其中一个不是数字。已改为
+  用词表示缺失。
+
+### 23.6 留档的开口
+
+1. `eval run` 没有 `--train-config`，两 artifact 的 prompt 读取行不可比（已由 caveat 披露）。
+   若要修，正确形态是先让报告记录自己的预算来源，再谈参数。
+2. `PROMPT_OVERHEAD_CHARS` 仍未计入 assistant 回答轮（§21.6），随预算线性放大。
+3. 真正不带 `<STRUCTURED_SIGNALS>` 信号块的重训仍未做（docs/09 第 7 节）。

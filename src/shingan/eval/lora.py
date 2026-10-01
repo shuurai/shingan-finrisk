@@ -176,6 +176,129 @@ def difference_plan(
 
 
 @dataclass(slots=True)
+class CorpusScope:
+    """Whether the SFT corpus a run checks itself against was built at the run's own budget.
+
+    :class:`PromptIntegrity` answers "do the prompts I rebuild match the file?" — after
+    rendering every prompt on the panel. This answers the question one step earlier and
+    much more cheaply: *is this the corpus I think it is?*
+
+    The failure it exists for is specific and was measured. ``lora.max_seq_length`` sets
+    the prompt's character budget, and it lives in a **training** overlay. A scoring
+    command that cannot read that overlay computes a smaller budget than the corpus was
+    rendered at, rebuilds shorter prompts, and then reports a prompt-integrity failure on
+    every row that admitted the extra text. The message that follows sends the reader to
+    rebuild the corpus — which is already correct. The corpus's own ``manifest.json``
+    records the budget and the file that supplied it, so the disagreement can be named
+    instead of discovered: a run that is about to measure a model on prompts truncated
+    differently from its training data is refused, and the refusal names both files.
+
+    ``agrees`` is three-valued on purpose. A corpus written before the manifest recorded
+    these fields, or one whose manifest is absent, has *not been measured* — and
+    ``None`` keeps that distinct from a pass in the report, because the byte-for-byte
+    prompt comparison that follows is then the only gate standing.
+    """
+
+    directory: Path
+    run_budget: int
+    run_seq_length: int
+    manifest_present: bool = False
+    corpus_budget: int | None = None
+    corpus_seq_length: int | None = None
+    corpus_train_config: str | None = None
+
+    @property
+    def agrees(self) -> bool | None:
+        """``True``/``False`` when the manifest states a budget, ``None`` when it does not."""
+        if self.corpus_budget is None:
+            return None
+        return self.corpus_budget == self.run_budget
+
+    def describe(self) -> str:
+        """One line for the console, stating what was compared and what it settled."""
+        if not self.manifest_present:
+            return (
+                f"corpus scope: {self.directory} has no manifest.json, so its character "
+                f"budget is unverified against this run's {self.run_budget:,}. The prompt "
+                "comparison below is the only check standing."
+            )
+        if self.corpus_budget is None:
+            return (
+                f"corpus scope: {self.directory}/manifest.json does not record a character "
+                f"budget, so its {self.run_budget:,} is unverified. The prompt comparison "
+                "below is the only check standing."
+            )
+        verdict = "agrees" if self.agrees else "**disagrees**"
+        source = self.corpus_train_config or "not recorded"
+        # Both sides are named with words when absent. An interpolated `None` reads as a
+        # value — "max_seq_length None vs 8192" is a sentence about two numbers — and the
+        # whole point of this line is that a reader can tell what was compared.
+        corpus_length = (
+            "not recorded" if self.corpus_seq_length is None else str(self.corpus_seq_length)
+        )
+        return (
+            f"corpus scope: character budget {self.corpus_budget:,} (from {source}) "
+            f"{verdict} with this run's {self.run_budget:,}"
+            f" (max_seq_length {corpus_length} vs {self.run_seq_length})"
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "directory": str(self.directory),
+            "run_budget": self.run_budget,
+            "run_max_seq_length": self.run_seq_length,
+            "manifest_present": self.manifest_present,
+            "corpus_budget": self.corpus_budget,
+            "corpus_max_seq_length": self.corpus_seq_length,
+            "corpus_train_config": self.corpus_train_config,
+            "agrees": self.agrees,
+        }
+
+
+def corpus_scope(directory: Path, *, run_budget: int, run_seq_length: int) -> CorpusScope:
+    """Read an SFT corpus's manifest and compare its budget with the run's.
+
+    Pure file I/O — no torch, no panel — so a machine that cannot train can still assert
+    that scoring will refuse a mismatched corpus.
+
+    Args:
+        directory: The SFT corpus directory, i.e. what ``data sft --out`` wrote.
+        run_budget: The character budget this run will render prompts at.
+        run_seq_length: The ``max_seq_length`` that budget came from, recorded so the
+            comparison names both sides of the conversion rather than one of them.
+
+    Returns:
+        The :class:`CorpusScope`. A missing or unreadable manifest is reported as *not
+        measured* rather than raising: the caller still has the byte-for-byte prompt
+        comparison, and refusing to score because metadata is absent would turn a
+        missing record into a failed model.
+    """
+    manifest_path = Path(directory) / "manifest.json"
+    scope = CorpusScope(
+        directory=Path(directory),
+        run_budget=int(run_budget),
+        run_seq_length=int(run_seq_length),
+    )
+    if not manifest_path.is_file():
+        return scope
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return scope
+    if not isinstance(payload, Mapping):
+        return scope
+
+    scope.manifest_present = True
+    budget = payload.get("character_budget")
+    seq_length = payload.get("max_seq_length")
+    train_config = payload.get("train_config")
+    scope.corpus_budget = int(budget) if isinstance(budget, (int, float)) else None
+    scope.corpus_seq_length = int(seq_length) if isinstance(seq_length, (int, float)) else None
+    scope.corpus_train_config = str(train_config) if train_config else None
+    return scope
+
+
+@dataclass(slots=True)
 class PromptIntegrity:
     """Whether the prompts rebuilt for scoring are the prompts the adapter was trained on.
 
@@ -867,6 +990,32 @@ def build_payload(
                 "citation(s) named no document rendered into that row's prompt; the "
                 "scores stand, but any evidence-grounded reading of those rows does not"
             )
+    # The fitted baselines are re-fitted here, at *this* run's budget — and the budget is
+    # set by a training overlay, so two artifacts can carry the same row name at two
+    # different text lengths. Only the rows that read the prompt are affected; the two the
+    # LoRA row is actually subtracted from (`structured`, `structured_matched`) are not.
+    # Said out loud because the table invites exactly one cross-artifact comparison.
+    scope = prompt.get("corpus") or {}
+    if isinstance(scope, Mapping) and scope.get("corpus_train_config"):
+        budget = prompt.get("chars_budget")
+        # Formatted with separators, and named rather than interpolated when absent, for
+        # the same reason `CorpusScope.describe` does it: a caveat whose number is
+        # unreadable, or which prints a bare `None` where a count belongs, is a sentence a
+        # reader skips — and this one carries the only warning that two artifacts' rows may
+        # not be the same measurement.
+        budget_phrase = (
+            f"{budget:,}-character budget"
+            if isinstance(budget, (int, float))
+            else "character budget its record does not state"
+        )
+        fixed_caveats.append(
+            f"the fitted baseline rows that read the prompt (text_baseline, fused) were "
+            f"rendered at this run's {budget_phrase}, set by "
+            f"{scope['corpus_train_config']}. An `eval run` invoked without that overlay "
+            "fits the same-named rows at the base config's budget, so those two rows are "
+            "comparable only between artifacts that used the same one. structured and "
+            "structured_matched read no prompt text and are unaffected."
+        )
     return {
         "metadata": {
             "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
