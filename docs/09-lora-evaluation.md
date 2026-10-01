@@ -1474,11 +1474,41 @@ payload 里因此同时记 `chars_budget` 与 `corpus`：单看 `chars_budget` �
 - `CorpusScope` 12 项测试（`tests/test_corpus_scope.py`）：一致 / 不一致 / 三种未测 / `null` 不
   变成字符串 `None` / payload 两侧都记 / caveat 只在语料记了覆写时出现。
 - 负例实测：不带 `--train-config` 在 **1.05 秒**内以正确措辞拒绝（上引）。
+- **宽池 `--dry-run` 通过，这是重训前最要紧的一条证据**：
+
+```
+$ python -m shingan eval lora --dry-run --data-config configs/data/stage2_wide.yaml \\
+      --train-config configs/train/qlora_qwen3_14b.yaml \\
+      --sft-dir data/processed/sft_stage2_wide
+corpus scope: character budget 13,764 (from configs\\train\\qlora_qwen3_14b.yaml)
+agrees with this run's 13,764 (max_seq_length 8192 vs 8192)
+split assigned: train=7441 valid=1833 test=3523 purged=358 excluded=1514
+14021 of 14669 prompts exceeded the 13764-character budget and were truncated
+test block: 3521 observable rows for tail_risk, 202 positive(s) in the scored subset
+prompt check: 9140/9140 user turns for tail_risk rebuilt byte-identically to the SFT
+              file (9140 records scanned, 0 for other labels); system turn: 9140/9140
+              identical to the current SYSTEM_PROMPT
+dry run: prompts built and verified, no model loaded. length min/median/max =
+         241/10399/13937 chars; truncated 14021 of 14669
+```
+
+**9,140/9,140 两个轮都一致**，所以 §22 的 8,192 语料确实是从这一次运行会用到的同一份配置
+渲染出来的。重训之后 `eval lora` 可以直接在宽池的 3,521 行 / 202 正样本上打分，不需要先重建语料。
+这一条是「先修评测再训」的全部理由：如果没有它，那 6–8 小时之后才会发现打分被自己的门拦住。
+
 - 全量 431 项测试通过，ruff 干净。
 
+两个**运行时**事实值得记下（它们改变的是计划，不是结论）：
+
+1. **干跑 30 分 53 秒**，与 `data sft` 重建同量级（29.8 分钟）——它重建全部 14,669 行的 prompt。
+   `CorpusScope` 的 1.05 秒省下的正是这半小时里的错误分支：配错的运行不会先浪费掉它。
+2. `max_seq_length` 的字符预算对**区段**是硬约束，对**整条 prompt** 不是：渲染后最长 13,937 字符，
+   超预算 173。这不是新缺陷，就是 §21.6 那条（预留额没算满分词成本）；token 侧实测 p100 7,752
+   < 8,192，余量 440 仍然吸收得住。
+
 没验证：
-- **没有加载 14B，也没有跑任何打分。** 宽池的 `--dry-run`（重建全部 prompt 并逐字节比对，约需
-  数十分钟）证明的只是 prompt 可重建，不是适配器会产出可解析输出——后者要等 §22.2 的重训。
+- **没有加载 14B，也没有跑任何打分。** 上面这次证明的是 prompt 可逐字节重建，不是适配器会产出
+  可解析输出——后者要等 §22.2 的重训。
 - 测试里那条 `test_the_training_overlay_changes_the_budget` 这轮**失败过一次**：它写的时候两个
   文件都在 4096，作用是「等它们不再一致时被注意到」。§22 抬高覆写之后它就该失败。断言被**反转**
   而不是删掉：若哪天覆写被改回 base 值，它会说「`--train-config` 仍然正确但已不再承重」。
