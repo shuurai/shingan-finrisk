@@ -60,6 +60,43 @@ versions must be recorded — because a run that trained nothing must not report
 Reasoning and the class of bug this closes: section 2.6 of
 [`docs/04-training.md`](../docs/04-training.md).
 
+## `probe_train_throughput.py`: what one optimisation step actually costs
+
+A check, not a wrapper, and the second one that exists because of a specific lost run.
+
+```bash
+.venv/Scripts/python.exe scripts/probe_train_throughput.py \
+    --sft-dir data/processed/sft_stage2_wide \
+    --train-config configs/train/qlora_qwen3_14b.yaml --rows 32
+```
+
+The 2026-10-01 wide-pool retrain was launched on a projection — 23.5 s/step measured once at
+a 4,096-token window, scaled by the new corpus's 1.71x median token ratio. The run's first
+step took **54 minutes**, and every one of the 246 steps it managed before dying landed
+between 2,032 and 3,240 s/step: **50 to 80 times the projection, visible in the first
+minute.** A projection cannot be checked from inside the run it is wrong about. This script
+is that check, and it costs two steps instead of 6.5 days.
+
+It slices the real corpus to `--rows` examples, runs the **production** command
+(`python -m shingan train lora`, `-u`) with the same data and training overlays, and reports
+what the trainer itself measured — not a stopwatch over the whole process, which would be
+dominated by loading 28 GB of weights. It also samples VRAM and host-memory high-water marks
+while the child runs, because on this machine those decide whether the card can host the run
+at all: `D:\ComfyUI\python\python.exe` is a second compute process holding ~23.5 GB, which
+leaves a 14B QLoRA about 9 GB of a 32 GB card.
+
+The verdict scales the measured baseline to the `max_seq_length` in the overlay it was
+given and passes only within 2x. The band is a factor rather than a number because two runs
+of the *same* configuration differ by 13.7% (23.5 vs 26.7 s/step); a 2x band still catches a
+50x pathology on its first step. Exit status is 0 inside the band and 1 outside, so a
+runbook can gate on it.
+
+It deliberately re-implements nothing: a probe that reimplements the training loop measures
+the probe. What it adds is the slice, the sampling, and the verdict.
+
+Reasoning, and the post-mortem this closes: section 25 of
+[`docs/09-lora-evaluation.md`](../docs/09-lora-evaluation.md).
+
 ## The analysis scripts: the ones that decide something
 
 These do not run the pipeline. They read what it produced and decide whether a claim holds,
@@ -74,6 +111,7 @@ displayed value and a judgement that can disagree is the failure mode they exist
 | `compare_eval_reports.py` | Did the change under test move any metric — and are the two runs even comparable? |
 | `stage2_auc_audit.py` | Is the first Stage 2 AUC a measurement or an artefact of five positives? |
 | `card_values.py` | What goes on the model card, read from the artifacts rather than typed in? |
+| `probe_train_throughput.py` | What does one optimisation step actually cost here — and is the card free enough to host the run at all? Two steps, production path. |
 
 Two conventions they share, both learned the hard way:
 

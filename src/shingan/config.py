@@ -558,6 +558,15 @@ class LoraConfig(_StrictModel):
         "the usual cause of DataLoader failures there.",
     )
     eval_strategy: Literal["no", "steps", "epoch"] = "epoch"
+    # Checkpointing is the only thing standing between a multi-day run and total loss, and
+    # the trainer's own defaults are `save_strategy: steps` with `save_steps: 500` -- which
+    # write **no** intermediate checkpoint in any run shorter than 500 steps. The
+    # 2026-10-01 wide-pool run was 457 steps, so a death at step 246 cost all 6.5 days of
+    # it (docs/09 section 25). `save_steps: 50` puts eight checkpoints inside that run.
+    # `assert_run_is_resumable` refuses the combination this default replaces, so the
+    # interval cannot silently drift back above the length of the run.
+    save_strategy: Literal["no", "steps", "epoch"] = "steps"
+    save_steps: int = Field(default=50, ge=1)
     save_total_limit: int = Field(default=3, ge=1)
     logging_steps: int = Field(default=10, ge=1)
     report_to: str = "none"

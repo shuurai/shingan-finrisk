@@ -835,6 +835,7 @@ def train_lora_command(
         LoraLeakageError,
         MissingTrainDependencies,
         TrainingStackMismatch,
+        UnresumableRun,
         train_lora,
     )
 
@@ -868,6 +869,10 @@ def train_lora_command(
     except TrainingStackMismatch as exc:
         # The message already names the offending keys, the installed versions and the
         # reinstall command; a hint on top of it would be the same sentence twice.
+        _fail(str(exc))
+    except UnresumableRun as exc:
+        # The message names the run length, the strategy in force and both ways to fix it,
+        # which is why there is no hint here either.
         _fail(str(exc))
 
     table = Table(title="LoRA run", title_justify="left")

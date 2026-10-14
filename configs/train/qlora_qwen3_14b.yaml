@@ -92,9 +92,11 @@ lora:
   # run**: still 4.3x the training that produced the last adapter, from a third of the
   # wall clock (measured baseline: 108 steps / 2,538 s in `artifacts/lora/run.json`).
   # Epochs two and three are three times the cost for two more points on the same curve,
-  # and checkpoints are resumable, so the cheap direction is to look at the validation
-  # curve first and continue only if it is still improving. Raising this back to 3 is a
-  # deliberate decision, not a default.
+  # and checkpoints are resumable -- which only became true on 2026-10-01, when the
+  # `save_strategy`/`save_steps` pair below was added after this very run turned out to
+  # schedule none (docs/09 section 25) -- so the cheap direction is to look at the
+  # validation curve first and continue only if it is still improving. Raising this back
+  # to 3 is a deliberate decision, not a default.
   num_train_epochs: 1
   per_device_train_batch_size: 1
   per_device_eval_batch_size: 1
@@ -116,6 +118,26 @@ lora:
   dataloader_num_workers: 0
 
   eval_strategy: epoch
+  # -----------------------------------------------------------------------------------
+  # Checkpointing. These two lines are why a 457-step run is resumable at all.
+  #
+  # They were missing until 2026-10-01, which left the trainer's own defaults in force:
+  # `save_strategy: steps` with `save_steps: 500`. A 457-step run therefore scheduled **no
+  # checkpoint until its final save** -- and when it died at step 246 after 6.5 days of GPU
+  # time, all of it was lost: no checkpoint, no loss value, no run.json. The failure was
+  # invisible in every previous run because every previous run was 108 steps, i.e. short
+  # enough that the end-of-run save is the only save anyone would ever have noticed.
+  #
+  # 50 puts eight recoverable points inside a 457-step run (steps 50..450). It is not a
+  # tuned constant: it is the trainer's default divided by ten, chosen so that the interval
+  # is smaller than any run this project actually launches. `assert_run_is_resumable`
+  # refuses to start a run longer than 50 steps that would schedule none, so this cannot
+  # silently drift back above the end of the run.
+  #
+  # `save_total_limit: 3` keeps the last three, so the disk holds ~3 adapters, not 457.
+  # -----------------------------------------------------------------------------------
+  save_strategy: steps
+  save_steps: 50
   save_total_limit: 3
   logging_steps: 10
   # No experiment tracker: it is an optional dependency, and a training run that fails

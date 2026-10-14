@@ -360,6 +360,17 @@ class TrainingStackMismatch(RuntimeError):
     """
 
 
+class UnresumableRun(RuntimeError):
+    """The run would write no checkpoint until it finished, so a crash costs all of it.
+
+    Deliberately not a :class:`TrainingStackMismatch`: the installed libraries accept every
+    argument here and the trainer will run happily. That is the problem. On 2026-10-01 a
+    run built with the trainer's defaults reached step 246 of 457 after 6.5 days of GPU
+    time and died leaving no checkpoint, no loss value and no ``run.json``, because
+    ``save_strategy: steps`` with ``save_steps: 500`` cannot fire inside a 457-step run.
+    """
+
+
 def library_versions(*names: str) -> dict[str, str]:
     """Installed distribution versions for ``names``, without importing them.
 
@@ -449,6 +460,83 @@ def resolve_warmup_steps(config: LoraConfig, n_train_examples: int, *, world_siz
         world_size=world_size,
     )
     return math.floor(float(config.warmup_ratio) * steps + 0.5)
+
+#: Steps a run has to reach before losing it is worse than redoing it. Below this the
+#: trainer's default interval of 500 was harmless, and every run this project had done
+#: before 2026-10-01 was 108 steps -- which is exactly why nobody noticed that the default
+#: can never fire. This number is a judgement rather than a measurement: 50 steps of the
+#: wide corpus is hours of GPU time, which is past the point where "just run it again" is
+#: honest advice.
+REDOABLE_STEPS = 50
+
+
+def scheduled_checkpoints(
+    config: LoraConfig, n_train_examples: int, *, world_size: int = 1
+) -> list[int]:
+    """Steps at which a checkpoint lands **before** the last one, in order.
+
+    The trainer always writes a final save when a run ends. That save cannot be resumed
+    *into* the run that produced it, so it is not a checkpoint this function returns:
+    what it returns is the set of steps a crash could have been recovered from.
+    """
+    total = total_optimizer_steps(
+        n_train_examples,
+        batch_size=config.per_device_train_batch_size,
+        accumulate=config.gradient_accumulation_steps,
+        epochs=config.num_train_epochs,
+        world_size=world_size,
+    )
+    if config.save_strategy == "no":
+        return []
+    if config.save_strategy == "epoch":
+        # One save per epoch, at each epoch boundary. With a single epoch the only save is
+        # the final one, which puts the run in the same position as no interval at all.
+        per_epoch = max(1, total // max(1, config.num_train_epochs))
+        return [per_epoch * epoch for epoch in range(1, config.num_train_epochs)]
+    return list(range(config.save_steps, total, config.save_steps))
+
+
+def assert_run_is_resumable(
+    config: LoraConfig, n_train_examples: int, *, world_size: int = 1
+) -> None:
+    """Refuse to start a run that could only be resumed by starting over.
+
+    Called from :func:`train_lora` beside
+    :func:`~shingan.models.lora.assert_trainer_arguments_supported`, for the same reason:
+    both are cheap facts about the arguments, and both are worthless once the weights are
+    loaded.
+
+    Raises:
+        UnresumableRun: If the run is longer than :data:`REDOABLE_STEPS` and no checkpoint
+            is scheduled inside it.
+    """
+    total = total_optimizer_steps(
+        n_train_examples,
+        batch_size=config.per_device_train_batch_size,
+        accumulate=config.gradient_accumulation_steps,
+        epochs=config.num_train_epochs,
+        world_size=world_size,
+    )
+    if total <= REDOABLE_STEPS:
+        return
+    if config.save_strategy == "no":
+        raise UnresumableRun(
+            f"lora.save_strategy is 'no' and this run is {total} optimisation steps, so "
+            f"there is nothing to resume from at any point. Remove the setting to use the "
+            f"project default, or make the run short enough to be redoable "
+            f"({REDOABLE_STEPS} steps or fewer)."
+        )
+    if scheduled_checkpoints(config, n_train_examples, world_size=world_size):
+        return
+    raise UnresumableRun(
+        f"this run is {total} optimisation steps and schedules no checkpoint before its "
+        f"last one, so a crash at step {total - 1} would cost the whole run "
+        f"(save_strategy={config.save_strategy!r}, save_steps={config.save_steps}, "
+        f"num_train_epochs={config.num_train_epochs}). Lower `lora.save_steps` below "
+        f"{total}, or raise `lora.num_train_epochs` above 1 so that an epoch save lands "
+        f"inside the run as well as at its end."
+    )
+
 
 
 def accepted_arguments(target: Any) -> set[str] | None:
@@ -551,6 +639,8 @@ def build_sft_config_kwargs(
         "fp16": bool(config.fp16),
         "max_grad_norm": float(config.max_grad_norm),
         "logging_steps": int(config.logging_steps),
+        "save_strategy": config.save_strategy,
+        "save_steps": int(config.save_steps),
         "save_total_limit": int(config.save_total_limit),
         "eval_strategy": config.eval_strategy if eval_enabled else "no",
         "report_to": config.report_to,
@@ -686,6 +776,10 @@ def train_lora(
         seed=resolved_seed,
     )
     assert_trainer_arguments_supported(trainer_arguments, SFTConfig, label="SFTConfig")
+    # The second cheap gate, and the one learned the expensive way: a run that cannot
+    # be resumed is a run that gets repeated in full, and this machine has already
+    # spent 157 hours on one that left nothing to resume from.
+    assert_run_is_resumable(config, len(train_dataset))
     training_arguments = SFTConfig(**trainer_arguments)
 
     torch.manual_seed(resolved_seed)
