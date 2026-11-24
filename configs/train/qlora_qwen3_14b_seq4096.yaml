@@ -1,0 +1,102 @@
+# =====================================================================================
+# Shingan — QLoRA training overlay (Track B), 4096 / 5,982-char wide-pool run
+# =====================================================================================
+# Deep-merged onto `configs/default.yaml` by `shingan train lora`.
+#
+# WHY THIS FILE EXISTS INSTEAD OF EDITING qlora_qwen3_14b.yaml
+# -----------------------------------------------------------
+# That file raised `max_seq_length` to 8192 on 2026-09-30 (commit 0791f38) and the
+# corpus was rebuilt at its 13,764-character budget (commit a55ad25). On this one RTX
+# 5090 (32 GB, Windows/WDDM) that corpus pushed activation memory past the card: the
+# 2026-10-01 run thrashed at 2,032-3,240 s/step for 6.5 days and died at step 246 of
+# 457 with no checkpoint. The 2026-11-24 control probe proved the machine, driver and
+# stack were all fine -- the variable was our own corpus rebuild. docs/09 section 26
+# records the retraction.
+#
+# `sft_stage2_wide/` (7,307/1,833 rows, 13,764 chars) is a record of that event and
+# its manifest names qlora_qwen3_14b.yaml as the config that built it. Changing that
+# file would make the record lie about what happened, so it stays as-is. This overlay
+# is the *other* decision: keep the wide pool's 7,307 rows, accept the 5,982-character
+# budget that the control probe showed this card can actually train at ~40 s/step.
+# The matching corpus is the archived `data/processed/sft_stage2_wide_seq4096/`
+# (7,307/1,833, character_budget 5,982, SHA-256 pinned in ARCHIVE_MANIFEST.json).
+#
+# TRAIN AND SCORE MUST BOTH USE THIS FILE. `eval lora`'s `CorpusScope` compares the
+# character budget implied by `--train-config` (via `chars_budget_for_seqlength`) with
+# the SFT manifest's `character_budget`; 4096 -> 5,982 -> agrees. Pointing scoring at
+# the 8192 overlay (13,764) would refuse the run before building a panel.
+#
+# Everything below is identical to qlora_qwen3_14b.yaml except the window, the output
+# directory, and the comments that describe the window. Read that file's comments and
+# docs/04-training.md section 2.2 for the reasoning behind the quantisation, adapter,
+# optimiser and Windows-specific settings -- they are not repeated here.
+# =====================================================================================
+
+lora:
+  base_model: Qwen/Qwen3-14B
+
+  load_in_4bit: true
+  bnb_4bit_quant_type: nf4
+  bnb_4bit_use_double_quant: true
+  bnb_4bit_compute_dtype: bfloat16
+
+  lora_r: 32
+  lora_alpha: 64
+  lora_dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj]
+  bias: none
+
+  # 4096 tokens -> 5,982 characters. This is a **content budget, not only a length cap**:
+  # `chars_budget_for_seq_length` turns it into the character budget the prompt's filing
+  # and news sections are trimmed to fit, so the number decides how much source text
+  # reaches the model at all. It is deliberately the same budget the archived wide-pool
+  # corpus was built at; `data sft --train-config <this file>` reproduces it.
+  #
+  # The 8192 -> 13,764 variant is not a free upgrade: it is what made the 2026-10-01 run
+  # thrash. On 32 GB under WDDM the difference is a threshold (paging), not a slope.
+  # See scripts/audit_window_sensitivity.py: changing only the trainer ceiling does
+  # NOT change the input -- to change the input you must rebuild the corpus.
+  max_seq_length: 4096
+
+  learning_rate: 0.0001
+  lr_scheduler_type: cosine
+  # Kept as a ratio on purpose; `shingan.models.lora` resolves it to `warmup_steps`
+  # because transformers v5 removed `warmup_ratio` (docs/04-training.md section 2.6).
+  warmup_ratio: 0.03
+  # 1, not 3. On the wide corpus the train fold is 7,307 rows, so one epoch is 457 steps
+  # and 7,307 sample exposures -- 4.3x the entire 566-row 3-epoch run that produced the
+  # last adapter. Checkpoints are resumable, so look at the validation curve before
+  # paying for epochs two and three.
+  num_train_epochs: 1
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 16
+  gradient_checkpointing: true
+
+  optim: paged_adamw_8bit
+  bf16: true
+  fp16: false
+
+  attn_implementation: sdpa
+  packing: false
+  dataloader_num_workers: 0
+
+  eval_strategy: epoch
+  # Checkpointing: these two lines are why a 457-step run is resumable at all. They were
+  # missing on 2026-10-01, leaving the trainer's `save_steps: 500` default, so a death
+  # at step 246 lost all 6.5 days. `assert_run_is_resumable` refuses to start a run
+  # longer than 50 steps that would schedule none (docs/09 section 25).
+  save_strategy: steps
+  save_steps: 50
+  save_total_limit: 3
+  logging_steps: 10
+  report_to: none
+  max_grad_norm: 1.0
+
+  packing_max_chars: null
+  device_map: single
+
+  # Keep this short: Windows MAX_PATH is 260 chars by default and these paths nest
+  # deeply under the repository (docs/06-windows-setup.md). `train lora --output-dir`
+  # overrides it, but the recorded default should not point at a stale artifact.
+  output_dir: artifacts/lora-wide-seq4096

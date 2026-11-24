@@ -11,6 +11,18 @@ The dataset schema and the label definitions are versioned separately via the
 
 ## [Unreleased]
 
+### Added
+- `configs/train/qlora_qwen3_14b_seq4096.yaml`: a 4096 / 5,982-character-budget training
+  overlay for the wide pool, derived from the shipped 8192 overlay without editing it (the
+  13,764-budget corpus's manifest names that file, so changing it would falsify a record).
+  Train and score must both use this file: `eval lora`'s `CorpusScope` compares its implied
+  budget with the SFT manifest and refuses on disagreement.
+- `scripts/preflight_wide_seq4096.py` + 8 tests (5 mutation tests): verifies the archived
+  corpus's SHA-256, the corpus/overlay budget agreement, the 457-step / 9-checkpoint run
+  shape and `assert_run_is_resumable`, and `SFTConfig` argument compatibility -- all on CPU
+  before any weights are loaded.
+
+
 ### Fixed
 - Retracted the 2026-10-14 "driver/machine changed" hypothesis about the 6.5-day QLoRA
   run (docs/09 section 25.5). The machine, driver and training stack never changed: a

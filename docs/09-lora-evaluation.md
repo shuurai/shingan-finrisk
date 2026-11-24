@@ -1841,3 +1841,153 @@ python -m shingan data sft --data-config <data overlay> \
   `save_steps: 50` 起 1 epoch；若坚持 13,764 字符预算，则需要更大显存或非 Windows
   环境（Linux 会当场 OOM 而不是静默换页）。**这两种都不再需要「先验证机器」这一步**。
 - **仍然没答案的**：F1（文本轨有无增量）。宽池上至今没有给任何适配器打过分。
+
+
+## 27. Step 17 重做：宽池 7,307 行 + 5,982 预算，先探针再起 1 epoch（2026-11-24）
+
+§26.4 给出的方向是「要用宽池的 7,307 行就得接受 5,982 字符预算」。本节记录把它落地的
+**全部前置检查**，以及为什么这一次和 10-01 那次不是同一件事。
+
+### 27.1 契约缺口：shipped overlay 与归档语料的预算不一致
+
+`sft_stage2_wide_seq4096/`（10-01 归档的 4096 预算宽池语料）的 `manifest.json` 记
+`character_budget 5,982` / `max_seq_length 4096` / `train_config: null`，三个文件
+（manifest + train + valid）与 `ARCHIVE_MANIFEST.json` 里的 SHA-256 逐项吻合。但 shipped
+`configs/train/qlora_qwen3_14b.yaml` 现在是 **8192**（预算 13,764）。`eval lora` 的
+`CorpusScope` 会把本次运行的预算与语料 manifest 比对，不一致就**在 `build_panel` 之前
+拒绝**（§23.2）。也就是说：拿归档语料训、拿 shipped overlay 打分，是打不了的。
+
+按「不覆盖已发生事件的记录」这条纪律，处理方式**不是**把 8192 改回 4096——
+`sft_stage2_wide/`（13,764 预算）的 manifest 明写着是 `qlora_qwen3_14b.yaml` 建的，
+改那个文件会让记录撒谎。改为**新建**
+`configs/train/qlora_qwen3_14b_seq4096.yaml`：与 8192 那份逐项相同，只把
+`max_seq_length` 设为 4096、输出目录设为 `artifacts/lora-wide-seq4096`，并在文件头写清
+它为什么存在、以及训练与打分必须共用它。
+
+### 27.2 静态预检：四件在加载 28 GB 权重之前就能判定的事
+
+新增 `scripts/preflight_wide_seq4096.py`（8 项测试，含 5 个 mutation test）在 CPU 上、
+**不 import 模型**、一秒内回答四问：
+
+```
+1. archived corpus integrity     manifest/train/valid 三个 SHA-256 全部 OK
+2. corpus scope                  4096 -> run budget 5,982 | corpus recorded 5,982 | AGREES
+3. run shape                    n_train 7,307 | 1 epoch | 457 steps | warmup 14 |
+                                checkpoints 9 at [50..450] | assert_run_is_resumable PASS
+4. trainer API compatibility     SFTConfig accepts all 24 keys | max_length 4096 | save_steps 50
+VERDICT: pass
+```
+
+这四问正是 10-01 那次没问的：那次没有 checkpoint 门禁（`save_steps` 默认 500 > 457 步）、
+没有语料哈希、没有预算交叉校验、没有「这一档装不装得下」的测量。mutation test 逐个破坏
+语料字节、删 manifest、改预算、把 `save_steps` 调回 500——预检必须翻成 FAIL 才算数。
+
+`CorpusScope.describe()` 这次打印的是 `character budget 5,982 (from not recorded)
+agrees with this run's 5,982 (max_seq_length 4096 vs 4096)`。归档语料记了预算但**没记
+`train_config`**，所以它如实说「来源未记录」，而不是替它编一个文件名——三值语义
+（§23.3）在这里起作用：这是「一致」，不是「凭 manifest 也验过来源」。
+
+### 27.3 生产路径探针：先测步时，再谈长跑
+
+`--effective-tokens` 用真实 tokenizer 实测归档语料前 32 行的渲染长度，不拿窗口上限当
+输入长度（§26.2 修掉的正是这个）：
+
+```
+$ python scripts/audit_window_sensitivity.py ...   # 前置：确认窗口扫描是否有效
+$ python -c "...apply_chat_template..."          # 实测：p50 1,926 / p100 2,328 / min 1,525
+$ python scripts/probe_train_throughput.py \
+    --sft-dir data/processed/sft_stage2_wide_seq4096 \
+    --out data/processed/sft_probe_seq4096 \
+    --train-config configs/train/qlora_qwen3_14b_seq4096.yaml \
+    --rows 32 --effective-tokens 1926 \
+    --log lora_probe_seq4096.log \
+    --output-dir artifacts/lora-probe-seq4096 --timeout-seconds 900
+
+2/2 steps | 41.5 s/step | peak VRAM 21,629 MiB | peak host RAM 13.2 GiB
+train_loss 1.8531 | exit 0
+VERDICT: pass -- 41.5 s/step is within 2.0x of 36.3 s/step
+                  (baseline scaled to 1926 effective tokens)
+```
+
+与 §26.1 的决定性对照同档（30.47 s 首步 / 40.8 s 末步、25,748 MiB、511 W），
+与病态的 1,361 s/步、32,108 MiB、142–152 W 是两个世界。**显存 21.6 GiB 留了约
+10 GiB 余量**，这是「装得下」的直接证据，而不是投影。
+
+按 41.5 s/步，457 步约 **5.3 h**；按探针观察到的跑间方差（§24.3，±13.7%）
+读作 **4.6–6.0 h**。这个数字来自本次实测的步时，不是 §24.3 那张线性缩放表。
+
+### 27.4 打分侧 dry-run：先确认训完能打分
+
+§23.5 把 `eval lora --dry-run` 称为「重训前最要紧的一条证据」——它逐字节重建
+9,140 行 SFT prompt 并与语料比对，避免 6 小时之后才发现打分被自己的门拦住。这次用的是
+**归档的 4096 语料**（不是 §23.5 验过的 8192 语料），所以必须重验：
+
+```
+$ python -m shingan eval lora --dry-run \
+    --data-config configs/data/stage2_wide.yaml \
+    --train-config configs/train/qlora_qwen3_14b_seq4096.yaml \
+    --sft-dir data/processed/sft_stage2_wide_seq4096
+
+corpus scope: character budget 5,982 (from not recorded) agrees with this run's
+5,982 (max_seq_length 4096 vs 4096)
+```
+
+静态侧已先确认两件事：归档语料的 system 轮与当前 `SYSTEM_PROMPT` **逐字节一致**
+（sha256 `ae84f329…`，1,380 字符）；且 10-01 之后 `src/shingan/` 只有 `7eb6a79`
+（checkpoint 门禁）一处提交，没碰 `prompts.py` / `pipeline.py` / 数据构建路径。
+
+**dry-run 实测通过**（`eval_lora_dryrun_seq4096.log`，29 分 54 秒，`build_panel` 重建
+14,669 行 prompt）：
+
+```
+test block: 3521 observable rows for tail_risk, 202 positive(s) in the scored subset
+prompt check: 9140/9140 user turns for tail_risk rebuilt byte-identically to the SFT
+              file (9140 records scanned, 0 for other labels); system turn: 9140/9140
+              identical to the current SYSTEM_PROMPT
+dry run: prompts built and verified, no model loaded.
+         length min/median/max = 241/6063/6168 chars; truncated 14386 of 14669
+```
+
+`9140/9140` 两个轮都一致 → 归档语料确实是这一次打分会用到的同一份配置渲染出来的。
+`truncated 14386 of 14669` 数的是「至少一区段被字符预算削过」，**不是 prompt 超长**
+（§22.3）：渲染后最长 6,168 字符、预算 5,982，超出的 186 字符是 §21.6 那条
+`PROMPT_OVERHEAD_CHARS` 未算 assistant 轮的老缺口，刻意未改。
+
+### 27.5 起训与仍未回答的 F1
+
+训练命令（`-u` 无缓冲日志，§25.3 那 24 条 loss 字典就是被块缓冲吞掉的）：
+
+```
+$ python -u -m shingan train lora \
+    --train-config configs/train/qlora_qwen3_14b_seq4096.yaml \
+    --train-file data/processed/sft_stage2_wide_seq4096/train.jsonl \
+    --eval-file  data/processed/sft_stage2_wide_seq4096/valid.jsonl \
+    --output-dir artifacts/lora-wide-seq4096 --verbose
+```
+
+**启动实测**（`lora_train_wide_seq4096.log`，2026-11-24）：`0/457` → `3/457`，与预检的
+457 步逐字吻合（无样本被丢弃）；稳态 **27.4 s/步**（第 1 步 31.6 s），
+**26,973 MiB / 96% util / 522 W**。522 W 是「卡在真正地算」的签名（§26.1），不是
+换页的 ~140 W。按 27.4 s/步，457 步约 **3.5 h**，加 epoch 末 1,833 行验证与保存，
+总时长读作 **3.5–4.5 h**（跑间方差 ±13.7%，§24.3）。
+
+**一处必须点名的数字差异**：探针的 peak VRAM 是 **21,629 MiB**（§27.3），长跑是
+**26,973 MiB**——探针只喂了 32 行切片（p100 2,328 tokens），全量 7,307 行的 p100
+是 2,916（§26.4），长序列把激活显存推高约 5.3 GiB，但仍留约 5.6 GiB 余量、没越
+32 GiB 墙。**§27.3 的 21,629 MiB 是探针值，不是本轮长跑的显存值**；两者不能混用。
+
+训完直接在宽池 test 上打分（`--mode both` 同进程先基座臂后适配器，才是配对增量），
+再用 `scripts/compare_eval_reports.py` 与 structured / fused / `structured_matched`
+对照——**先判可比性再算差值**。打分命令与训练共用同一份 4096 overlay 与
+`--sft-dir data/processed/sft_stage2_wide_seq4096`，dry-run 已证明这条路通。
+
+必须写清这次**没有**做什么，否则 F1 的答案会被误读：
+
+- 语料预算回到 5,982，等于放弃 §21 扩窗带来的「每 prompt 原文 ×2.03」。宽池的收益
+  只剩**行数**（7,307 vs 566）和正样本数（train 154 vs 4，见 `stage2_wide.yaml`），
+  这是 §26 结论的直接代价。
+- 已存档的两个 14B adapter 都训在合成语料上；本轮**启动**的是第一个训在**真实宽池**语料上的训练，adapter 是否存在要等它跑完（`save_steps: 50` 提供 9 个可恢复点）。
+- prompt 仍携带 `STRUCTURED_SIGNALS`（12 列），所以 `text_only_lora` 依然是
+  prompt-conditioned，必须与同信息量的 `structured_matched` 比，不能只比 `structured`。
+- 真正不带信号块的重训、以及 `eval run` 的 `--train-config` 开口，都还没做（§23.4、
+  §26 仍是已知限制）。
