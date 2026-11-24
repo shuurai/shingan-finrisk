@@ -11,6 +11,30 @@ The dataset schema and the label definitions are versioned separately via the
 
 ## [Unreleased]
 
+### Fixed
+- Retracted the 2026-10-14 "driver/machine changed" hypothesis about the 6.5-day QLoRA
+  run (docs/09 section 25.5). The machine, driver and training stack never changed: a
+  2026-11-24 control probe on the 5,982-character-budget corpus finished 6/6 steps at
+  30-41 s/step, 25,748 MiB, 511 W. The variable was our own corpus rebuild in `0791f38`
+  + `a55ad25`, which doubled the character budget (5,982 -> 13,764) and pushed real
+  sequence lengths from p50 1,417 to p50 3,184 tokens past the 32 GiB VRAM wall; WDDM
+  paging then produced 100% util at ~140 W and 30-80x slower steps.
+- The 4,096 / 6,144 / 8,192 "window scan" was not an experiment: all three probes used
+  the same already-built corpus and only moved a truncation ceiling that clipped 1, 0
+  and 0 of 32 rows respectively (0.84% spread). "Three slow results" was an experiment
+  design artifact, not evidence about the window or the machine.
+- `probe_train_throughput.py` no longer scales its baseline by the configured
+  `max_seq_length` (a ceiling, not the input length). It now takes a measured
+  `--effective-tokens`, returns a three-valued verdict when that measurement is absent,
+  and prints the corpus's build-time budget next to the ceiling.
+
+### Added
+- `scripts/audit_window_sensitivity.py` + 10 tests: measures real token lengths under
+  candidate windows, reports clipped rows and effective-token spread, and refuses to
+  endorse a window scan that cannot vary the input (exit 1). Includes a mutation test
+  proving the verdict flips when truncation is disabled.
+- `tests/test_probe_train_throughput.py` + 9 tests for the corrected verdict.
+
 ### Added
 - `configs/data/stage2_wide.yaml` + `configs/universes/wide_stage2.txt`: the positives
   expansion. The shipped configuration trains on 4 usable positives and a 14B SFT run on

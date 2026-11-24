@@ -112,6 +112,7 @@ displayed value and a judgement that can disagree is the failure mode they exist
 | `stage2_auc_audit.py` | Is the first Stage 2 AUC a measurement or an artefact of five positives? |
 | `card_values.py` | What goes on the model card, read from the artifacts rather than typed in? |
 | `probe_train_throughput.py` | What does one optimisation step actually cost here — and is the card free enough to host the run at all? Two steps, production path. |
+| `audit_window_sensitivity.py` | Would varying `max_seq_length` actually change what the model is fed? Decides whether a window scan is informative **before** any GPU time is spent. |
 
 Two conventions they share, both learned the hard way:
 

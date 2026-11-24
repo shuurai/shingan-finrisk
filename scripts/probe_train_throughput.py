@@ -42,9 +42,17 @@ from pathlib import Path
 # two runs of the *same* configuration (artifacts/lora and artifacts/lora-contract-v2)
 # differ by 13.7% (23.5 vs 26.7 s/step), so single-digit precision here would be a
 # fiction. A 2x band still catches a 50x pathology on its first step.
+#
+# 2026-11-24: the reference point is the **effective input length**, not the ceiling.
+# Those two runs trained on a 566-row corpus whose rendered prompts had a median of
+# ~1,417 tokens, at a `max_seq_length` of 4,096. The ceiling is only a truncation cap;
+# trl leaves shorter rows untouched. Scaling by 4,096 was a category error -- it treated
+# the widest allowed sequence as the sequence actually fed in, and made every verdict
+# look more generous than the data supported. This band is a coarse magnitude check for
+# a 30x pathology, not a performance certificate.
 BASELINE_S_PER_STEP = 23.5
 BASELINE_SPREAD = 1.137  # the slower of the two identical-configuration runs
-BASELINE_WINDOW_TOKENS = 4096
+BASELINE_EFFECTIVE_TOKENS = 1417
 TOLERANCE_FACTOR = 2.0
 
 # `transformers` renders progress as `  4%|##  | 20/457 [12:11:13<288:14:46, 2374.57s/it]`
@@ -62,6 +70,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--rows", type=int, default=32, help="train rows to keep; steps = rows / accumulate")
     parser.add_argument("--log", type=Path, default=Path("lora_probe.log"))
     parser.add_argument("--timeout-seconds", type=int, default=5400, help="abort after this long")
+    parser.add_argument(
+        "--effective-tokens",
+        type=int,
+        default=None,
+        help="median rendered token count of this corpus, measured with "
+        "scripts/audit_window_sensitivity.py; required for a verdict, because the "
+        "configured max_seq_length is only a ceiling, not the input length",
+    )
     parser.add_argument("--dry-run", action="store_true", help="slice and print the command, run nothing")
     return parser.parse_args(argv)
 
@@ -184,17 +200,29 @@ def _clock_seconds(text: str) -> float:
     return parts[0] * 3600 + parts[1] * 60 + parts[2]
 
 
-def verdict(s_per_step: float, window: int, tolerance: float) -> tuple[bool, str]:
-    """Compare against the baseline scaled to this window, or say it cannot be compared."""
-    if window <= 0:
-        return False, "no window width given, so the baseline cannot be scaled to it"
-    expected = BASELINE_S_PER_STEP * BASELINE_SPREAD * (window / BASELINE_WINDOW_TOKENS)
+def verdict(
+    s_per_step: float, effective_tokens: int | None, tolerance: float
+) -> tuple[bool | None, str]:
+    """Compare against the baseline scaled to the length actually fed in.
+
+    Three-valued: ``None`` means the effective length was not measured, so no verdict
+    can be given. Passing the configured ``max_seq_length`` here is exactly the mistake
+    this signature is designed to refuse -- a ceiling that never clips a row does not
+    describe the input.
+    """
+    if effective_tokens is None or effective_tokens <= 0:
+        return None, (
+            "the corpus's effective token length was not measured, so the baseline "
+            "cannot be scaled to it -- run scripts/audit_window_sensitivity.py and "
+            "pass --effective-tokens"
+        )
+    expected = BASELINE_S_PER_STEP * BASELINE_SPREAD * (effective_tokens / BASELINE_EFFECTIVE_TOKENS)
     limit = expected * tolerance
     if s_per_step <= limit:
-        return True, f"{s_per_step:.1f} s/step is within {tolerance}x of {expected:.1f} s/step (baseline scaled to {window} tokens)"
+        return True, f"{s_per_step:.1f} s/step is within {tolerance}x of {expected:.1f} s/step (baseline scaled to {effective_tokens} effective tokens)"
     return False, (
         f"{s_per_step:.1f} s/step is {s_per_step / expected:.0f}x the {expected:.1f} s/step baseline "
-        f"scaled to {window} tokens -- this is the 2026-10-01 failure mode, do not launch the full run"
+        f"scaled to {effective_tokens} effective tokens -- this is the 2026-10-01 failure mode, do not launch the full run"
     )
 
 
@@ -226,6 +254,14 @@ def main(argv: list[str] | None = None) -> int:
         str(args.output_dir),
     ]
     print("command:", " ".join(command))
+    print(
+        f"ceiling under test: {configured_ceiling(args.train_config):.0f} (a truncation cap, NOT the input length)",
+        flush=True,
+    )
+    print(
+        "corpus built with: " + ", ".join(f"{k}={v}" for k, v in corpus_build_knobs(args.sft_dir).items()),
+        flush=True,
+    )
     if args.dry_run:
         return 0
 
@@ -253,18 +289,39 @@ def main(argv: list[str] | None = None) -> int:
 
     measured = last["s_per_step"]
     print(f"trainer reported: step {last['step']:.0f}/{last['total']:.0f} at {measured:.1f} s/step")
-    ok, message = verdict(measured, int(window_argument(args.train_config)), TOLERANCE_FACTOR)
+    ok, message = verdict(measured, args.effective_tokens, TOLERANCE_FACTOR)
+    if ok is None:
+        print(f"VERDICT: not measured -- {message}")
+        return 1
     print(f"VERDICT: {'pass' if ok else 'FAIL'} -- {message}")
     return 0 if ok else 1
 
 
-def window_argument(train_config: Path) -> float:
-    """The window the probe actually trained at, read from the overlay it was given."""
+def configured_ceiling(train_config: Path) -> float:
+    """The trainer's truncation cap. It is an upper bound, not the length of the input."""
     for line in train_config.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
         if stripped.startswith("max_seq_length:"):
             return float(stripped.split(":", 1)[1].strip())
     raise SystemExit(f"no max_seq_length in {train_config}, so the baseline cannot be scaled")
+
+
+def corpus_build_knobs(sft_dir: Path) -> dict[str, object]:
+    """What budget actually produced this corpus. Missing fields are 'not recorded'."""
+    manifest = sft_dir / "manifest.json"
+    if not manifest.is_file():
+        return {"manifest": "absent (not measured)"}
+    try:
+        import json
+
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"manifest": "unreadable (not measured)"}
+    return {
+        "max_seq_length": data.get("max_seq_length", "not recorded"),
+        "character_budget": data.get("character_budget", "not recorded"),
+        "train_config": data.get("train_config", "not recorded"),
+    }
 
 
 if __name__ == "__main__":
